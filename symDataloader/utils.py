@@ -155,9 +155,9 @@ class TaskCore:
         """
         func need to be a call function have 3 arguments -- dbStr, question, choicesStr
         """
-        for dbIdx in tqdm(range(dbLimit)):
-            for sampleIdx in range(sampleLimit):
-                for questionIdx in range(questionLimit):
+        for dbIdx in tqdm(range(dbLimit), desc=f"DBs ({dbn})", position=0, leave=True):
+            for sampleIdx in tqdm(range(sampleLimit), desc=f"  Sample", position=1, leave=False):
+                for questionIdx in tqdm(range(questionLimit), desc=f"    Questions", position=2, leave=False):
                     if self.resultCheck(
                         dbn, model, scale, markdown, dbIdx, sampleIdx, questionIdx
                     ):
@@ -183,13 +183,13 @@ class TaskCore:
                     error = ""
                     res = ""
                     try:
-                        # res = func(dbStr, question, choicesStr)
-                        res = func(
-                            dbStr,
-                            question,
-                            choicesStr,
-                            (dbn, scale, dbIdx, sampleIdx, questionIdx, item[-5]),
-                        )
+                        res = func(dbStr, question, choicesStr)
+                        # res = func(
+                        #     dbStr,
+                        #     question,
+                        #     choicesStr,
+                        #     (dbn, scale, dbIdx, sampleIdx, questionIdx, item[-5]),
+                        # )
                         pred = extractAnswer(res)
                         time.sleep(timeSleep)
                     except Exception as e:
