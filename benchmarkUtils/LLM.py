@@ -16,18 +16,18 @@ def gptCall(model,
             proxies={
                 'http': 'socks5://127.0.0.1:1080',
                 'https': 'socks5://127.0.0.1:1080',
-            }, # 代理字典, 这里默认使用1080端口的sock5代理
+            }, # Proxy dictionary; defaults to a SOCKS5 proxy on port 1080
             OPENAI_API_KEY=None,
             otherInfo={},
             delPrompt=True
             ):
     """
-    model: gpt模型, 包括gpt-4, gpt-4o, gpt-4o-mini等
-    prompt: 提示词
-    logStart: 日志文件开头, 建议不要插入 `_` 在其中
-    logPath: 日志文件地址, 若不存在则自动创建
-    proxies: requests使用的代理地址, 默认是在1080端口的socks5代理
-    OPENAI_API_KEY: openai的key, 如果保持None则读取环境变量
+    model: GPT model, e.g. gpt-4, gpt-4o, gpt-4o-mini
+    prompt: prompt text
+    logStart: prefix for log file names; avoid inserting '_' in it
+    logPath: directory for log files; created automatically if it doesn't exist
+    proxies: proxy configuration for requests; default is a SOCKS5 proxy on port 1080
+    OPENAI_API_KEY: OpenAI API key; if None, read from environment variable
     """
     os.makedirs(logPath, exist_ok=True)
     if OPENAI_API_KEY is None:
@@ -70,9 +70,9 @@ def gptCall(model,
 
 def countDBToken(dbPath, markdown=False):
     """
-    dbPath: sqlite路径
-    markdown: 是否转化成markdown格式, 否则转化为csv格式
-    统计sqlite文件中表格转化成相应文件后的token大小
+    dbPath: path to the SQLite file
+    markdown: whether to convert to Markdown format (otherwise CSV)
+    Counts the token size of the tables in the SQLite file after serialization
     """
     if not os.path.isfile(dbPath):
         return 0

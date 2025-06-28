@@ -7,19 +7,19 @@ from pprint import pprint
 class DB:
     def __init__(self, dbp, initTables=True):
         """
-        这里要与旧版代码兼容, 因此添加了initTables用于初始化表格
-        如果只是做采样, 建议设置为False以加快速度
+        This remains compatible with older code, so `initTables` is added to initialize tables.
+        If you are only performing sampling, set this to `False` to speed things up.
         """
         self.dbp = dbp
         self.dbn = dbp.split('/')[-1].split('.')[0]
 
         self.conn = sqlite3.connect(self.dbp)
-        # 牺牲一定的安全性大幅度提升性能
+        # Trade some safety for significant performance gain
         # self.conn.execute('PRAGMA journal_mode=WAL;')
         # self.conn.commit()
         self.conn.execute('PRAGMA synchronous=OFF;')
         self.conn.commit()
-        self.conn.execute('PRAGMA cache_size=-16777216') # 设置4GB缓存
+        self.conn.execute('PRAGMA cache_size=-16777216') # Set 4 GB cache size
         self.conn.commit()
 
         self.curs = self.conn.cursor()
@@ -32,8 +32,8 @@ class DB:
 
     def defaultSerialization(self, markdown=False):
         """
-        markdown: True则序列化为markdown的表格, False则序列化为CSV格式
-        默认的序列化方案, 可以选择是否使用markdown
+        markdown: If True, serialize as a Markdown table; if False, serialize as CSV.
+        This is the default serialization strategy; you can choose whether to use Markdown.
         """
         tables = self.initDataFrame()
 
@@ -46,7 +46,7 @@ class DB:
         return '\n\n'.join(tableList)
 
     def rowCount(self, tabName):
-        # 获取行数
+        # Get row count
         self.curs.execute(f'SELECT COUNT(*) FROM [{tabName}];')
         return self.curs.fetchall()[0][0]
 
@@ -60,7 +60,7 @@ class DB:
     
     def initDataFrame(self):
         """
-        注意, 要从这个接口去读表格, 这样才会把表格名称中的white space都换成 '_'
+        Note: Read tables through this interface so that any whitespace in table names is replaced with “_”.
         """
         if len(self.tables) > 0:
             return self.tables
@@ -68,7 +68,7 @@ class DB:
 
         dataframes = {}
         for tn in tablesName['name']:
-            newTN = tn.strip().replace(' ', '_').replace('-', '_').replace('\t', '_') # 注意给定的dataframe名字要把空格之类的换掉, 否则没法跑
+            newTN = tn.strip().replace(' ', '_').replace('-', '_').replace('\t', '_') # Make sure to replace spaces, tabs, etc. in the DataFrame name; otherwise the code won’t run
             dataframes[newTN] = pd.read_sql(f"SELECT * FROM [{tn}]", self.conn)
         self.tables = dataframes
         return dataframes
@@ -105,7 +105,7 @@ class DB:
         return foreignKey
 
     def getAllForeignKeys(self):
-        # 这里获得的foreign key关系仅仅用于拓扑排序!
+        # The foreign‑key relationships obtained here are used only for topological sorting!
         tableNames = self.getAllTableNames()
         allForeignKeys = {}
         for tbn in tableNames:
@@ -127,8 +127,10 @@ class DB:
 
     def getAllRootKeys(self):
         """
-        在getALlForeignKeys中, 会返回一个dict, dict的key代表表格名tbn, value中的元素代表tbn中currentColumn与foreignTable中的foreignColumn相连接
-        但在我们的实现中, 我们需要知道一个表格rootTable, 其rootColumn有哪些表格linkedTable的linkedColumn连进来了, 可能同一个column会有多个表连进来
+        `getAllForeignKeys` returns a dict whose keys are table names (`tbn`) and whose values list
+        the relationships where `currentColumn` in `tbn` connects to `foreignColumn` in `foreignTable`.
+        For our purposes we need, for each root table, to know which linkedTable.linkedColumn points
+        into its rootColumn; the same column can be referenced by multiple tables.
         """
         allForeignKeys = self.getAllForeignKeys()
         allRootKeys = {}
@@ -136,7 +138,7 @@ class DB:
             allRootKeys[k] = []
         for k, v in allForeignKeys.items():
             for item in v:
-                # 注意, 有可能会省略
+                # Note: It may be omitted
                 allRootKeys[item['foreignTable']].append({'rootColumn': self.getTableKey(item['foreignTable'])[0] if item['foreignColumn'] is None else item['foreignColumn'],
                                                           'linkedTable': k,
                                                           'linkedColumn': item['currentColumn']})
@@ -172,13 +174,13 @@ class DB:
         return topoOrder
 
     def sample(self, dstPath, sampleNum=16, removeEmpty=True, removeOldVer=True):
-        # 注意, 每次需要重新初始化cursor和connect, 刷新掉所有的临时表
+        # Note: re‑initialize the cursor and connection each time to refresh all temporary tables
         self.curs.close()
         self.conn.close()
         self.conn = sqlite3.connect(self.dbp)
         self.curs = self.conn.cursor()
 
-        # 如果指定了要删除旧数据库, 且存在旧数据库, 则删除
+        # If `removeOldVer` is True and an old database exists, delete it
         if removeOldVer and os.path.isfile(dstPath):
             os.remove(dstPath)
         topoOrder = self.getTopology()
@@ -197,9 +199,9 @@ class DB:
         # 对表格进行采样, 使得表格满足外键关系
         for tbn in topoOrder[::-1]:
             if len(allRootKeys[tbn]) == 0:
-                # 没有其他表格外键到tbn
+                # No other tables reference `tbn` via foreign keys
                 columnNames = self.getAllColumnNames(tbn)
-                columnNames = [f'[{item}]' for item in columnNames] # 别忘了所有的column都要加上[]来防止有空格在里面
+                columnNames = [f'[{item}]' for item in columnNames] # Wrap every column name in [ ] to guard against spaces
 
                 cmd = f"""
                 INSERT INTO [Sampled{tbn}]
@@ -219,7 +221,7 @@ class DB:
                 """ # 这里创建的是一个临时表, 在本次连接中都有效, 创建VIEW会永久提交, 使用WITH只在当次查询中有效, 注意区分
                 self.curs.execute(cmd)
             else:
-                # 通过维护状态来实现复合外键关系, 但好像stmt的写法有问题
+                # Maintain state to handle composite foreign keys, although the statement syntax may still be problematic
                 artIdx = 0
                 whereList = [allRootKeys[tbn][artIdx]]
                 artIdx += 1
@@ -239,7 +241,7 @@ class DB:
                         self.curs.execute(cmd)
                         whereList = [allRootKeys[tbn][artIdx]]
                     artIdx += 1
-                # 最后别忘了清空whereList中的剩余内容
+                # Finally, don’t forget to flush any remaining items in `whereList`
                 if len(whereList) > 1:
                     print('There are more than 2 columns foreign key among 2 tables.')
                 whereStmt = ' AND '.join([f"[{tbn}].[{item['rootColumn']}] in (SELECT [Sampled{item['linkedTable']}].[{item['linkedColumn']}] FROM [Sampled{item['linkedTable']}])" for item in whereList])
@@ -251,7 +253,7 @@ class DB:
                   """
                 self.curs.execute(cmd)
 
-        # 将结果保存到另一个表中
+        # Save the results into another database
         zeroRow = False
         newConn = sqlite3.connect(dstPath)
         newCurs = newConn.cursor()
@@ -276,8 +278,9 @@ class DB:
 
     def getMergedTable(self):
         """
-        获取没有外键过来的表, 这些表用于与其他表内容join, 生成最后的大表
-        这些大表后续会被采样row, 并prompt LLM生成text描述, 安插入fact-verification中, 作为简单样例
+        Get tables that no other tables reference via foreign keys; these tables will be joined with
+        others to produce a final large table. Rows from these large tables will later be sampled and
+        fed to an LLM to generate text descriptions for fact‑verification examples.
         """
         pass
 

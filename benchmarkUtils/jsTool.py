@@ -1,5 +1,5 @@
 import os
-import simplejson as json # simplejson主要是更兼容一点
+import simplejson as json # simplejson is more compatible
 
 class JS:
     def __init__(self, jsPath):
