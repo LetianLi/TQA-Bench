@@ -11,6 +11,7 @@ import random
 import sys
 import lmstudio as lms
 import re
+from tqdm import tqdm
 
 sys.path.append('.')
 from symbolic import dataDict
@@ -21,7 +22,7 @@ from benchmarkLoader import singlePrompt
 # 1. One global model handle (re-used for every call)
 # ---------------------------------------------------------------------------
 lms.configure_default_client("localhost:5841")
-_MODEL = lms.llm("qwen2.5-7b-instruct-mlx")   # alias used by LM Studio catalog
+_MODEL = lms.llm("qwen/qwen3-8b")   # alias used by LM Studio catalog
 
 # ---------------------------------------------------------------------------
 # 2. Prompt helper (same as before)
@@ -39,25 +40,57 @@ def qwenLocalCall(dbStr, question, choices):
     Runs one inference via LM Studio and returns the raw completion string.
     """
     prompt = qaPrompt(dbStr, question, choices)
+    maxTokens = 30000
 
-    result = _MODEL.complete(
+    # Create progress bars
+    prompt_pbar = tqdm(total=100, desc="      Prompt", position=3, leave=False)
+    token_pbar = tqdm(total=maxTokens, desc="      Tokens", position=4, leave=False, unit="tokens")
+
+    # Track prompt processing progress
+    def on_prompt_progress(progress):
+        prompt_pbar.n = int(progress * 100)
+        prompt_pbar.refresh()
+
+    # Stream the completion
+    prediction_stream = _MODEL.complete_stream(
         prompt,
-        config={
-            "maxTokens": 1500,
-            "temperature": 0.85,
-            "topPSampling": 0.9,
+        config={ # Best parameters according to https://huggingface.co/Qwen/Qwen3-8B#best-practices
+            "maxTokens": maxTokens,
+            "temperature": 0.6,
+            "topPSampling": 0.95,
+            "topKSampling": 20,
+            "minPSampling": 0,
+            "repeatPenalty": 1.1,
+            "stopStrings": ["I AM DONE"]
         },
+        on_prompt_processing_progress=on_prompt_progress
     )
 
-    # `result` behaves like a str; avoid SDK version differences:
-    text = result.content if hasattr(result, "content") else str(result)
-    return text.strip()
+    # Process the stream
+    full_response = ""
+    token_count = 0
+    
+    for fragment in prediction_stream:
+        if hasattr(fragment, "content"):
+            full_response += fragment.content
+            token_count += 1
+            token_pbar.n = token_count
+            token_pbar.refresh()
+
+    # Close progress bars
+    prompt_pbar.close()
+    token_pbar.close()
+
+    # Get final result for stats
+    result = prediction_stream.result()
+    
+    return full_response.strip()
     
 
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/lmstudio_qwen.sqlite' # result sqlite
+    resultPath = 'symDataset/results/TableQA/lmstudio_qwen3.sqlite' # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
         # for scale in ['8k', '16k', '32k', '64k']:
@@ -67,7 +100,7 @@ if __name__ == '__main__':
             #     timeSleep = 30
             # elif scale == '32k':
             #     timeSleep = 60
-            tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
+            tc.testAll('Qwen3-8B-Instruct-Local', # The model name saved in taskPath
                     k, # dataset
                     scale, # 8k, 16k, 32k, 64k, 128k
                     False, # if use markdown
@@ -76,7 +109,7 @@ if __name__ == '__main__':
                     14, # questionLimit, 14 is ok
                     qwenLocalCall,
                     timeSleep)
-            tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
+            tc.testAll('Qwen3-8B-Instruct-Local', # The model name saved in taskPath
                     k, # dataset
                     scale, # 8k, 16k, 32k, 64k, 128k
                     True, # if use markdown

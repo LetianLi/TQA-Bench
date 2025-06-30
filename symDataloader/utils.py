@@ -191,6 +191,12 @@ class TaskCore:
                         #     (dbn, scale, dbIdx, sampleIdx, questionIdx, item[-5]),
                         # )
                         pred = extractAnswer(res)
+                        
+                        # Write debug output to lastOutput.txt
+                        debug_file_path = os.path.join(os.path.dirname(self.resultPath), "lastOutput.txt")
+                        with open(debug_file_path, 'w', encoding='utf-8') as f:
+                            f.write(res + "\n\n" + "*"*20 + "\n\nExtracted answer: " + pred)
+                        
                         time.sleep(timeSleep)
                     except Exception as e:
                         print(e)
