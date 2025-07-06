@@ -34,6 +34,9 @@ class TaskCore:
         correct integer,
         error text,
         message text,
+        input_tokens integer,
+        output_tokens integer,
+        qtype text,
         primary key (model, scale, markdown, dbidx, sampleidx, questionidx)
     );
     """
@@ -46,8 +49,8 @@ class TaskCore:
 
     inserttemplate = """
     insert or ignore into {table_name}
-    (model, scale, markdown, dbidx, sampleidx, questionidx, gt, pred, correct, error, message)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    (model, scale, markdown, dbidx, sampleidx, questionidx, gt, pred, correct, error, message, input_tokens, output_tokens, qtype)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """
 
     def __init__(self, dbRoot, taskPath, resultPath) -> None:
@@ -178,24 +181,30 @@ class TaskCore:
                     choicesStr = TaskCore.generateChoices(item[-4:])
                     gt = TaskCore.getRightChoices(item[-5])
                     question = item[-6]
+                    qtype = item[-7]
 
                     pred = ""
                     error = ""
                     res = ""
+                    resStr = ""
+                    input_tokens = 0
+                    output_tokens = 0
                     try:
                         res = func(dbStr, question, choicesStr)
-                        # res = func(
-                        #     dbStr,
-                        #     question,
-                        #     choicesStr,
-                        #     (dbn, scale, dbIdx, sampleIdx, questionIdx, item[-5]),
-                        # )
-                        pred = extractAnswer(res)
+                        if isinstance(res, tuple) and len(res) == 3: # Check if we return token info
+                            resStr, input_tokens, output_tokens = res
+                        else:
+                            resStr = str(res)  # Ensure res is a string
+                            # If no token info provided, set to 0
+                            input_tokens = 0
+                            output_tokens = 0
+                        
+                        pred = extractAnswer(resStr)
                         
                         # Write debug output to lastOutput.txt
                         debug_file_path = os.path.join(os.path.dirname(self.resultPath), "lastOutput.txt")
                         with open(debug_file_path, 'w', encoding='utf-8') as f:
-                            f.write(res + "\n\n" + "*"*20 + "\n\nExtracted answer: " + pred)
+                            f.write(resStr + "\n\n" + "*"*20 + "\n\nExtracted answer: " + pred)
                         
                         time.sleep(timeSleep)
                     except Exception as e:
@@ -214,7 +223,10 @@ class TaskCore:
                             pred,
                             gt == pred,
                             error,
-                            res,
+                            resStr,
+                            input_tokens,
+                            output_tokens,
+                            qtype,
                         ),
                     )
                     self.resultConn.commit()

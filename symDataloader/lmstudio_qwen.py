@@ -1,10 +1,7 @@
 """
 Wrapper for Qwen2.5-7B-Instruct served by LM Studio's local server.
 
-Requires:
-    pip install lmstudio
-    # and LM Studio desktop running, with the model downloaded:
-    #   lms get qwen2.5-7b-instruct-mlx
+Use `uv sync` to install the dependencies.
 """
 
 import random
@@ -22,7 +19,8 @@ from benchmarkLoader import singlePrompt
 # 1. One global model handle (re-used for every call)
 # ---------------------------------------------------------------------------
 lms.configure_default_client("localhost:5841")
-_MODEL = lms.llm("qwen/qwen3-8b")   # alias used by LM Studio catalog
+# _MODEL = lms.llm("qwen/qwen3-8b")   # alias used by LM Studio catalog
+_MODEL = lms.llm("qwen/qwen2.5-7b-instruct")   # alias used by LM Studio catalog
 
 # ---------------------------------------------------------------------------
 # 2. Prompt helper (same as before)
@@ -84,13 +82,17 @@ def qwenLocalCall(dbStr, question, choices):
     # Get final result for stats
     result = prediction_stream.result()
     
-    return full_response.strip()
+    # Get token information
+    input_tokens = result.stats.prompt_tokens_count
+    output_tokens = result.stats.predicted_tokens_count
+
+    return full_response.strip(), input_tokens, output_tokens
     
 
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/lmstudio_qwen3.sqlite' # result sqlite
+    resultPath = 'symDataset/results/TableQA/lmstudio_qwen2.5.sqlite' # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
         # for scale in ['8k', '16k', '32k', '64k']:
@@ -100,7 +102,7 @@ if __name__ == '__main__':
             #     timeSleep = 30
             # elif scale == '32k':
             #     timeSleep = 60
-            tc.testAll('Qwen3-8B-Instruct-Local', # The model name saved in taskPath
+            tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
                     k, # dataset
                     scale, # 8k, 16k, 32k, 64k, 128k
                     False, # if use markdown
@@ -109,7 +111,7 @@ if __name__ == '__main__':
                     14, # questionLimit, 14 is ok
                     qwenLocalCall,
                     timeSleep)
-            tc.testAll('Qwen3-8B-Instruct-Local', # The model name saved in taskPath
+            tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
                     k, # dataset
                     scale, # 8k, 16k, 32k, 64k, 128k
                     True, # if use markdown
