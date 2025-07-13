@@ -154,6 +154,7 @@ class TaskCore:
         questionLimit,
         func,
         timeSleep=0,
+        genDBObject=False,
     ):
         """
         func need to be a call function have 3 arguments -- dbStr, question, choicesStr
@@ -171,7 +172,9 @@ class TaskCore:
                     dbp = os.path.join(self.dbRoot, scale, dbn, f"{dbIdx}.sqlite")
                     db = DB(dbp)
                     dbStr = ""
-                    if markdown is None:
+                    if genDBObject:
+                        dbStr = db.defaultSerialization(dbObject=True)
+                    elif markdown is None:
                         dbStrList = []
                         for tbn, df in db.tables.items():
                             dbStrList.append(TaskCore.tableLlamaSerialize(tbn, df))
@@ -215,7 +218,7 @@ class TaskCore:
                         (
                             model,
                             scale,
-                            markdown,
+                            False,
                             dbIdx,
                             sampleIdx,
                             questionIdx,

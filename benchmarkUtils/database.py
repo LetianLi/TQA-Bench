@@ -4,6 +4,16 @@ import sqlite3
 from tqdm import tqdm
 from pprint import pprint
 
+class DatabaseObject:
+    """
+    A Python object representing a database with tableNames and tables properties.
+    tableNames: List of table names in the database
+    tables: Dictionary mapping table names to 2D arrays where table[0] is column names and table[n>=1] are data rows
+    """
+    def __init__(self, table_names: list[str], tables_dict: dict[str, list[list[str]]]):
+        self.tableNames = table_names
+        self.data = tables_dict
+
 class DB:
     def __init__(self, dbp, initTables=True):
         """
@@ -30,12 +40,28 @@ class DB:
         if initTables:
             self.tables = self.initDataFrame()
 
-    def defaultSerialization(self, markdown=False):
+    def defaultSerialization(self, markdown=False, dbObject=False):
         """
         markdown: If True, serialize as a Markdown table; if False, serialize as CSV.
-        This is the default serialization strategy; you can choose whether to use Markdown.
+        dbObject: If True, return a Python object with tableNames and tables properties.
+        This is the default serialization strategy; you can choose whether to use Markdown or dbObject.
+        If options are passed, dbObject takes precedence, then markdown, then csv by default.
         """
         tables = self.initDataFrame()
+
+        if dbObject:
+            # Convert DataFrames to 2D arrays where table[0] is column names and table[n>=1] are rows
+            tables_dict = {}
+            for table_name, df in tables.items():
+                # Get column names as the first row
+                column_names = df.columns.tolist()
+                # Get all data rows
+                data_rows = df.values.tolist()
+                # Combine column names and data rows
+                table_array = [column_names] + data_rows
+                tables_dict[table_name] = table_array
+            
+            return DatabaseObject(list(tables.keys()), tables_dict)
 
         tableList = []
         for k, v in tables.items():
@@ -76,7 +102,7 @@ class DB:
     def getAllTableNames(self):
         if len(self.tableNames) != 0:
             return self.tableNames
-        # 获取所有的表格名
+        # Get all table names
         self.curs.execute("""SELECT name 
                     FROM sqlite_master 
                     WHERE type = 'table' 
@@ -88,14 +114,14 @@ class DB:
         return tableNames
 
     def getAllColumnNames(self, tbn):
-        # 获取tbn所有的行名
+        # Get all column names for tbn
         self.curs.execute(f"PRAGMA table_info([{tbn}]);")
         res = self.curs.fetchall()
         columnNames = [item[1] for item in res]
         return columnNames
 
     def getSingleForeignKey(self, tbn):
-        # 获取tbn的外键信息
+        # Get foreign key information for tbn
         self.curs.execute(f"PRAGMA foreign_key_list([{tbn}]);")
         res = self.curs.fetchall()
         foreignKey = []
@@ -115,7 +141,7 @@ class DB:
 
     def getTableKey(self, tbn):
         """
-        获取主键
+        Get primary key
         """
         self.curs.execute(f'PRAGMA table_info([{tbn}]);')
         res = self.curs.fetchall()
@@ -189,14 +215,14 @@ class DB:
 
         allRootKeys = self.getAllRootKeys()
 
-        # 新建一系列临时表, 这些表都是空表
+        # Create a series of temporary tables, these tables are all empty
         for tbn in topoOrder[::-1]:
             cmd = f"""
             CREATE TEMPORARY TABLE [Sampled{tbn}] AS SELECT * FROM [{tbn}] WHERE 1=0;
             """
             self.curs.execute(cmd)
 
-        # 对表格进行采样, 使得表格满足外键关系
+        # Sample the tables to ensure they satisfy foreign key relationships
         for tbn in topoOrder[::-1]:
             if len(allRootKeys[tbn]) == 0:
                 # No other tables reference `tbn` via foreign keys
@@ -218,7 +244,7 @@ class DB:
                     LIMIT {sampleNum}
                   )
                   ORDER BY row_num;
-                """ # 这里创建的是一个临时表, 在本次连接中都有效, 创建VIEW会永久提交, 使用WITH只在当次查询中有效, 注意区分
+                """ # This creates a temporary table that is valid throughout this connection, creating a VIEW would be permanently committed, using WITH is only valid for the current query, note the distinction
                 self.curs.execute(cmd)
             else:
                 # Maintain state to handle composite foreign keys, although the statement syntax may still be problematic

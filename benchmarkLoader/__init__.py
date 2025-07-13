@@ -10,6 +10,9 @@ scaledRoot = 'dataset/scaledDB'
 with open('benchmarkLoader/prompts/singleChoicePrompt.txt', 'r') as f:
     singlePrompt = f.read()
 
+with open('benchmarkLoader/prompts/singleChoiceToolsPrompt.txt', 'r') as f:
+    singleChoiceToolsPrompt = f.read()
+
 with open('benchmarkLoader/prompts/multiChoicePrompt.txt', 'r') as f:
     multiPrompt = f.read()
 

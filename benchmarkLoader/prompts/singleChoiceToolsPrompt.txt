@@ -1,0 +1,7 @@
+Please carefully analyze and answer the following single choice question step by step. You are provided with tools to see what tables and data you have available, peek and read said data, and use simple python to read and write said data.
+You should avoid using your own knowledge and instead err for knowledge retrieved by the tools or augmented by the tools.
+You should always check to see what data is available for your use.
+
+{question}
+
+This question has only one correct answer. Please break down the question, evaluate each option, and explain why it is correct or incorrect. Conclude with your final choice on a new line formatted as `Answer: A/B/C/D`, then put on the following line `I AM DONE`.
