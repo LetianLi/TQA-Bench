@@ -90,33 +90,78 @@ def qwenLocalCall(dbStr, question, choices):
     
 
 if __name__ == '__main__':
-    dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
-    taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/lmstudio_qwen2.5.sqlite' # result sqlite
-    tc = TaskCore(dbRoot, taskPath, resultPath)
-    for k in dataDict.keys():
-        # for scale in ['8k', '16k', '32k', '64k']:
-        for scale in ['8k']:
-            timeSleep = 0
-            # if scale == '16k':
-            #     timeSleep = 30
-            # elif scale == '32k':
-            #     timeSleep = 60
-            tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
-                    k, # dataset
-                    scale, # 8k, 16k, 32k, 64k, 128k
-                    False, # if use markdown
-                    5, # dbLimit, 10 is ok
-                    1, # sampleLimit, 1 is ok
-                    14, # questionLimit, 14 is ok
-                    qwenLocalCall,
-                    timeSleep)
-            tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
-                    k, # dataset
-                    scale, # 8k, 16k, 32k, 64k, 128k
-                    True, # if use markdown
-                    5, # dbLimit, 10 is ok
-                    1, # sampleLimit, 1 is ok
-                    14, # questionLimit, 14 is ok
-                    qwenLocalCall,
-                    timeSleep)
+    # Example usage for interactive testing
+    if len(sys.argv) > 1 and sys.argv[1] == "interactive":
+        print("Qwen2.5-7B-Instruct Chat (LM Studio)")
+        print("Connected to LM Studio server at localhost:5841")
+        
+        while True:
+            user_input = input("\nUser: ")
+            if user_input.strip().lower() in {"exit", "quit"}:
+                break
+            
+            # Create a simple prompt for chat
+            prompt = f"<|im_start|>user\n{user_input}<|im_end|>\n<|im_start|>assistant\n"
+            
+            print("Assistant: ", end="", flush=True)
+            
+            # Stream the response
+            full_response = ""
+            token_count = 0
+            
+            try:
+                prediction_stream = _MODEL.complete_stream(
+                    prompt,
+                    config={
+                        "maxTokens": 512,
+                        "temperature": 0.7,
+                        "topPSampling": 0.9,
+                        "topKSampling": 20,
+                        "minPSampling": 0,
+                        "repeatPenalty": 1.1,
+                    }
+                )
+                
+                for fragment in prediction_stream:
+                    if hasattr(fragment, "content"):
+                        full_response += fragment.content
+                        token_count += 1
+                        print(fragment.content, end="", flush=True)
+                
+                print(f"\n[Response length: {len(full_response)} chars, ~{token_count} tokens]")
+                
+            except Exception as e:
+                print(f"\nError: {e}")
+                print("Make sure LM Studio is running with the Qwen2.5-7B-Instruct model loaded.")
+    else:
+        # Test structure similar to original
+        dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
+        taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
+        resultPath = 'symDataset/results/TableQA/lmstudio_qwen2.5.sqlite' # result sqlite
+        tc = TaskCore(dbRoot, taskPath, resultPath)
+        for k in dataDict.keys():
+            # for scale in ['8k', '16k', '32k', '64k']:
+            for scale in ['8k']:
+                timeSleep = 0
+                # if scale == '16k':
+                #     timeSleep = 30
+                # elif scale == '32k':
+                #     timeSleep = 60
+                tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
+                        k, # dataset
+                        scale, # 8k, 16k, 32k, 64k, 128k
+                        False, # if use markdown
+                        5, # dbLimit, 10 is ok
+                        1, # sampleLimit, 1 is ok
+                        14, # questionLimit, 14 is ok
+                        qwenLocalCall,
+                        timeSleep)
+                tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
+                        k, # dataset
+                        scale, # 8k, 16k, 32k, 64k, 128k
+                        True, # if use markdown
+                        5, # dbLimit, 10 is ok
+                        1, # sampleLimit, 1 is ok
+                        14, # questionLimit, 14 is ok
+                        qwenLocalCall,
+                        timeSleep)

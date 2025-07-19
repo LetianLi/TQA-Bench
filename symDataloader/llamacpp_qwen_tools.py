@@ -1,15 +1,21 @@
 """
-Wrapper for Qwen2.5-7B-Instruct served by LM Studio's local server.
+Wrapper for Qwen2.5-7B-Instruct using llama.cpp directly with tools.
 
 Use `uv sync` to install the dependencies.
 """
 
 import random
 import sys
-import lmstudio as lms
+import time
+import json
 import re
+from llama_cpp import Llama
+from llama_cpp.llama import StoppingCriteriaList
+from typing import Callable, Dict, List, Any
+import numpy as np
+import numpy.typing as npt
 from tqdm import tqdm
-from llm_sandbox import SandboxSession
+import pandas as pd
 
 sys.path.append('.')
 from symbolic import dataDict
@@ -17,10 +23,14 @@ from symDataloader.utils import TaskCore
 from benchmarkLoader import singleChoiceToolsPrompt
 from benchmarkUtils.database import DatabaseObject
 
-# Tools
-import pandas as pd
+# ---------------------------------------------------------------------------
+# 1. Global variables for tools
+# ---------------------------------------------------------------------------
 dbDataFrames: dict[str, pd.DataFrame] = {}
 
+# ---------------------------------------------------------------------------
+# 2. Tool definitions
+# ---------------------------------------------------------------------------
 def getTableNames():
     """
     Retrieve all table names in the database.
@@ -256,197 +266,216 @@ def executePython(code: str):
         tqdm.write(f"🔧 ERROR IN TOOL executePython: {e}", nolock=True)
         raise
 
-# ---------------------------------------------------------------------------
-# 1. One global model handle (re-used for every call)
-# ---------------------------------------------------------------------------
-lms.configure_default_client("localhost:5841")
-# _MODEL = lms.llm("qwen/qwen3-8b")   # alias used by LM Studio catalog
-# _MODEL = lms.llm("qwen/qwen2.5-7b-instruct")   # alias used by LM Studio catalog
-_MODEL = lms.llm("qwen/qwen2.5-7b-instruct")   # alias used by LM Studio catalog
+# Tool registry
+TOOLS = {
+    "getTableNames": {
+        "function": getTableNames,
+        "description": "Retrieve all table names in the database.",
+        "parameters": {}
+    },
+    "peekTables": {
+        "function": peekTables,
+        "description": "Peek the first 5 rows of each of the given table names.",
+        "parameters": {
+            "tableNames": {
+                "type": "list[str]",
+                "description": "A list of table names to peek."
+            }
+        }
+    },
+    "readTables": {
+        "function": readTables,
+        "description": "Read the given table names and return the entire data as a string.",
+        "parameters": {
+            "tableNames": {
+                "type": "list[str]",
+                "description": "A list of table names to read."
+            }
+        }
+    },
+    "executePython": {
+        "function": executePython,
+        "description": "Execute Python code in a sandboxed environment with access to the database tables.",
+        "parameters": {
+            "code": {
+                "type": "str",
+                "description": "Python code to execute."
+            }
+        }
+    }
+}
 
 # ---------------------------------------------------------------------------
-# 2. Prompt helper (same as before)
+# 3. One global model handle (re-used for every call)
 # ---------------------------------------------------------------------------
+_MODEL = None
+
+def get_model():
+    """Initialize and return the llama.cpp model instance."""
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = Llama.from_pretrained(
+            repo_id="Qwen/Qwen2.5-7B-Instruct-GGUF",
+            filename="qwen2.5-7b-instruct-q5_k_m-00001-of-00002.gguf",
+            additional_files=["qwen2.5-7b-instruct-q5_k_m-00002-of-00002.gguf"],
+            n_gpu_layers=-1,  # Use all available GPU layers
+            n_ctx=131072,  # Max context length 131072 tokens
+            n_batch=512,  # Evaluation Batch Size 512
+            n_threads=3,  # CPU Thread Pool Size 3
+            use_mmap=True,  # Enable memory mapping
+            use_mlock=True,  # Keep model in memory
+            offload_kqv=True,  # Offload KV cache to GPU memory
+            verbose=False
+        )
+    return _MODEL
+
+# ---------------------------------------------------------------------------
+# 4. Tool calling and response processing
+# ---------------------------------------------------------------------------
+def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """Extract tool calls from the model's response."""
+    tool_calls = []
+    
+    # Look for tool call patterns like:
+    # <tool_call>{"name": "getTableNames", "arguments": {}}</tool_call>
+    tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
+    matches = re.findall(tool_call_pattern, text, re.DOTALL)
+    
+    for match in matches:
+        try:
+            tool_call = json.loads(match)
+            if "name" in tool_call and "arguments" in tool_call:
+                tool_calls.append(tool_call)
+        except json.JSONDecodeError:
+            continue
+    
+    return tool_calls
+
+def execute_tool_call(tool_call: Dict[str, Any]) -> str:
+    """Execute a single tool call and return the result."""
+    tool_name = tool_call.get("name")
+    arguments = tool_call.get("arguments", {})
+    
+    if tool_name not in TOOLS:
+        return f"Error: Unknown tool '{tool_name}'"
+    
+    try:
+        tool_func = TOOLS[tool_name]["function"]
+        result = tool_func(**arguments)
+        return str(result)
+    except Exception as e:
+        return f"Error executing {tool_name}: {str(e)}"
+
+def format_tool_result(tool_name: str, result: str) -> str:
+    """Format tool result for inclusion in the conversation."""
+    return f'<tool_result name="{tool_name}">\n{result}\n</tool_result>'
+
 def qaPrompt(dbStr, question, choices):
     totalQuestion = f'{question}\n\n{choices}'
     prompt = singleChoiceToolsPrompt.format(question=totalQuestion)
     return prompt
 
 # ---------------------------------------------------------------------------
-# 3. Public API – plug into TaskCore
+# 5. Public API – plug into TaskCore
 # ---------------------------------------------------------------------------
-def qwenLocalCall(dbStr, question, choices):
+def qwenLlamaCppToolsCall(dbStr, question, choices):
     """
-    Runs one inference via LM Studio and returns the raw completion string.
+    Runs one inference via llama.cpp with tools and returns the raw completion string.
     """
     prompt = qaPrompt(dbStr, question, choices)
-    maxTokens = 30000
+    max_tokens = 1000
+    max_rounds = 5  # Limit tool calling rounds
     
-    # Variables to track results across rounds
+    # Get model instance
+    llm = get_model()
+    
+    # Set up database
+    global dbDataFrames
+    dbDataFrames = dbStr
+    
+    # Create progress bars
+    round_pbar = tqdm(total=max_rounds, desc="      Rounds", position=3, leave=False)
+    token_pbar = tqdm(total=max_tokens, desc="      Tokens", position=4, leave=False, unit="tokens")
+    
+    # Variables to track results
     full_response = ""
     total_input_tokens = 0
     total_output_tokens = 0
     current_round = 0
-    token_count = 0
     
-    # Debug variables
-    import time
-    start_time = time.time()
-    last_debug_write = start_time
-    tokenStream = ""
-    debugPath = 'symDataset/results/TableQA/lmstudio_qwen2.5_tools_debug.txt'
+    # Build the full conversation context
+    conversation = [
+        {"role": "system", "content": "You have access to tools to analyze database tables. Use them when needed to answer questions accurately."},
+        {"role": "user", "content": prompt}
+    ]
     
-    # Create progress bars
-    prompt_pbar = tqdm(total=100, desc="      Prompt (Round 0)", position=3, leave=False)
-    token_pbar = tqdm(total=maxTokens, desc="      Tokens (Round 0)", position=4, leave=False, unit="tokens")
-
-    # Track prompt processing progress
-    def on_prompt_progress(progress, round_index):
-        prompt_pbar.n = int(progress * 100)
-        prompt_pbar.refresh()
-
-    def on_prediction_fragment(fragment, round_index):
-        nonlocal token_count, tokenStream, last_debug_write
-        token_count += 1
-        token_pbar.n = token_count
-        token_pbar.refresh()
+    # Tool calling loop
+    while current_round < max_rounds:
+        round_pbar.n = current_round
+        round_pbar.refresh()
         
-        # Add fragment to tokenStream
-        if hasattr(fragment, 'content'):
-            tokenStream += fragment.content
+        # Use create_chat_completion with the conversation
+        response_stream = llm.create_chat_completion(
+            messages=conversation,
+            max_tokens=max_tokens,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            repeat_penalty=1.1,
+            stream=True,
+            stop=["I AM DONE"]
+        )
         
-        # Check if we should write to debug file
-        current_time = time.time()
-        elapsed_time = current_time - start_time
-        
-        # If it's been at least 10 seconds since last write
-        if (current_time - last_debug_write) >= 10:
-            try:
-                with open(debugPath, 'w', encoding='utf-8') as f:
-                    f.write(f"--- DEBUG WRITE AT {time.strftime('%H:%M:%S')} (ELAPSED: {elapsed_time:.1f}s) ---\n")
-                    f.write(f"Token count: {token_count}\n")
-                    f.write(f"Current round: {round_index}\n")
-                    f.write(f"Token stream so far:\n{tokenStream}\n")
-                    f.write("--- END DEBUG WRITE ---\n")
-                last_debug_write = current_time
-            except Exception as e:
-                # Silently fail if debug writing fails
-                pass
-
-    def on_message(message):
-        nonlocal full_response, tokenStream
-        # Extract content from assistant response messages
-        if hasattr(message, 'content') and message.content:
-            # Handle Sequence[TextData | FileHandle | ToolCallRequestData]
-            for content_item in message.content:
-                if hasattr(content_item, 'type'):
-                    if content_item.type == "text":
-                        full_response += content_item.text
-                    elif content_item.type == "toolCallRequest":
-                        tqdm.write("🔧 TOOL CALL REQUEST DETECTED", nolock=True)
-                        tool_request_str = "\n" + str(content_item) + "\n"
-                        full_response += tool_request_str
-                        tokenStream += tool_request_str
-                    elif content_item.type == "toolCallResult":
-                        tqdm.write("🔧 TOOL CALL RESULT RECEIVED", nolock=True)
-                        # Add tool call results to the response
-                        tool_result_str = "\n" + str(content_item) + "\n"
-                        full_response += tool_result_str
-                        tokenStream += tool_result_str
-                    else:
-                        other_content_str = "\n" + str(content_item) + "\n"
-                        full_response += other_content_str
-                        tokenStream += other_content_str
-                else:
-                    # Fallback for unexpected content types
-                    fallback_str = "\n" + str(content_item) + "\n"
-                    full_response += fallback_str
-                    tokenStream += fallback_str
-
-    def on_prediction_completed(round_result):
-        nonlocal total_input_tokens, total_output_tokens, current_round, full_response
-        current_round += 1
-        
-        # Aggregate token counts from round_result.stats
-        if hasattr(round_result, 'stats'):
-            if hasattr(round_result.stats, 'prompt_tokens_count'):
-                total_input_tokens += round_result.stats.prompt_tokens_count
-            if hasattr(round_result.stats, 'predicted_tokens_count'):
-                total_output_tokens += round_result.stats.predicted_tokens_count
-        
-        # Reset progress bars for new round
-        prompt_pbar.reset()
-        token_pbar.reset()
-        prompt_pbar.set_description(f"      Prompt (Round {current_round})")
-        token_pbar.set_description(f"      Tokens (Round {current_round})")
-        prompt_pbar.refresh()
-        token_pbar.refresh()
-
-    def on_round_end(round_index):
-        nonlocal full_response
-        tqdm.write(f"🔧 ROUND {round_index + 1} ENDED (TOOLS RESOLVED)", nolock=True)
-        # Add round end separator to response for debugging
-        full_response += f"\n\n--- ROUND {round_index + 1} ENDED (TOOLS RESOLVED) ---\n\n"
-
-    def on_round_start(round_index):
-        nonlocal token_count, full_response
+        # Process the streaming response
+        response_text = ""
         token_count = 0
         
-        if round_index > 0:  # Don't log for first round
-            tqdm.write(f"🔧 STARTING ROUND {round_index + 1}", nolock=True)
+        for chunk in response_stream:
+            if chunk["choices"][0]["delta"].get("content"):
+                content = chunk["choices"][0]["delta"]["content"]
+                response_text += content
+                token_count += 1
+                token_pbar.n = token_count
+                token_pbar.refresh()
         
-        # Add round separator to response for debugging
-        if round_index > 0:  # Don't add separator before first round
-            full_response += f"\n\n--- STARTING ROUND {round_index + 1} ---\n\n"
+        # For streaming responses, we need to estimate token counts
+        # Since we can't get usage from stream chunks, we'll use our manual count
+        input_tokens = len(llm.tokenize(prompt.encode())) if current_round == 0 else 0
+        output_tokens = token_count
         
-        prompt_pbar.reset()
-        token_pbar.reset()
-        prompt_pbar.set_description(f"      Prompt (Round {round_index + 1})")
-        token_pbar.set_description(f"      Tokens (Round {round_index + 1})")
-        prompt_pbar.refresh()
-        token_pbar.refresh()
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+        full_response += response_text
+        
+        # Add assistant response to conversation
+        conversation.append({"role": "assistant", "content": response_text})
+        
+        # Check for tool calls
+        tool_calls = extract_tool_calls(response_text)
+        
+        if not tool_calls:
+            # No tool calls, we're done
+            break
+        
+        # Execute tool calls
+        tool_results = []
+        for tool_call in tool_calls:
+            tool_name = tool_call["name"]
+            tqdm.write(f"🔧 EXECUTING TOOL: {tool_name}", nolock=True)
+            result = execute_tool_call(tool_call)
+            tool_results.append(format_tool_result(tool_name, result))
+        
+        # Add tool results to conversation
+        tool_response = "\n".join(tool_results)
+        conversation.append({"role": "tool", "content": tool_response})
+        
+        current_round += 1
     
-    def handle_invalid_tool_request(error, request):
-        nonlocal full_response
-        tqdm.write(f"🔧 INVALID TOOL REQUEST DETECTED: {error}", nolock=True)
-        full_response += f"\n\n--- INVALID TOOL REQUEST ---\n\n"
-        full_response += f"Error: {error}\n"
-        full_response += f"Request: {request}\n"
-        if request is None:
-            return full_response + "\nUnrecoverable error"
-        return None
-
-    # Stream the completion
-    global dbDataFrames
-    dbDataFrames = dbStr
-
-    act_result = _MODEL.act(
-        prompt,
-        [getTableNames, peekTables, readTables, executePython],
-        config={ # Best parameters according to https://huggingface.co/Qwen/Qwen3-8B#best-practices
-            "maxTokens": maxTokens,
-            "temperature": 0.6,
-            "topPSampling": 0.95,
-            "topKSampling": 20,
-            "minPSampling": 0,
-            "repeatPenalty": 1.1,
-            "stopStrings": ["I AM DONE"]
-        },
-        on_prompt_processing_progress=on_prompt_progress,
-        on_prediction_fragment=on_prediction_fragment,
-        on_message=on_message,
-        on_prediction_completed=on_prediction_completed,
-        on_round_start=on_round_start,
-        on_round_end=on_round_end,
-        handle_invalid_tool_request=handle_invalid_tool_request
-    )
-
     # Close progress bars
-    prompt_pbar.close()
+    round_pbar.close()
     token_pbar.close()
-
-    return full_response.strip(), total_input_tokens, total_output_tokens
     
+    return full_response.strip(), total_input_tokens, total_output_tokens
 
 if __name__ == '__main__':
     # Check for interactive mode
@@ -480,7 +509,7 @@ if __name__ == '__main__':
                 choices = "This is a user question, you do not need to format as a multiple choice question, just answer the query directly."
                 
                 # Call the model
-                response, input_tokens, output_tokens = qwenLocalCall(dbStr, question, choices)
+                response, input_tokens, output_tokens = qwenLlamaCppToolsCall(dbStr, question, choices)
                 
                 tqdm.write("\nResponse:", nolock=True)
                 tqdm.write("=" * 50, nolock=True)
@@ -499,8 +528,7 @@ if __name__ == '__main__':
         # Default mode - run the original benchmark
         dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
         taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-        resultPath = 'symDataset/results/TableQA/lmstudio_qwen2.5_tools_v2.sqlite' # result sqlite
-        debugPath = 'symDataset/results/TableQA/lmstudio_qwen2.5_tools_debug.txt' # debug file
+        resultPath = 'symDataset/results/TableQA/llamacpp_qwen2.5_tools.sqlite' # result sqlite
         tc = TaskCore(dbRoot, taskPath, resultPath)
         for k in dataDict.keys():
             # for scale in ['8k', '16k', '32k', '64k']:
@@ -510,13 +538,13 @@ if __name__ == '__main__':
                 #     timeSleep = 30
                 # elif scale == '32k':
                 #     timeSleep = 60
-                tc.testAll('Qwen2.5-7B-Instruct-Local-Tools', # The model name saved in taskPath
+                tc.testAll('Qwen2.5-7B-Instruct-LlamaCpp-Tools', # The model name saved in taskPath
                         k, # dataset
                         scale, # 8k, 16k, 32k, 64k, 128k
                         False, # if use markdown
                         5, # dbLimit, 10 is ok
                         1, # sampleLimit, 1 is ok
                         14, # questionLimit, 14 is ok
-                        qwenLocalCall,
+                        qwenLlamaCppToolsCall,
                         timeSleep,
-                        genDataFrames=True)
+                        genDataFrames=True) 

@@ -12,7 +12,7 @@ from benchmarkUtils.database import DB
 
 
 def extractAnswer(text: str) -> str:
-    patt = r"answer:\s*([A-F]+)"
+    patt = r"answer:\s*([A-F]+|N/A)"
     grps = re.findall(patt, text, re.IGNORECASE)
     if grps:
         return grps[-1].upper()
@@ -154,7 +154,7 @@ class TaskCore:
         questionLimit,
         func,
         timeSleep=0,
-        genDBObject=False,
+        genDataFrames=False,
     ):
         """
         func need to be a call function have 3 arguments -- dbStr, question, choicesStr
@@ -172,8 +172,9 @@ class TaskCore:
                     dbp = os.path.join(self.dbRoot, scale, dbn, f"{dbIdx}.sqlite")
                     db = DB(dbp)
                     dbStr = ""
-                    if genDBObject:
-                        dbStr = db.defaultSerialization(dbObject=True)
+                    if genDataFrames:
+                        # Create pandas DataFrames from the database tables
+                        dbStr = db.tables  # This is already a dict of DataFrames
                     elif markdown is None:
                         dbStrList = []
                         for tbn, df in db.tables.items():
