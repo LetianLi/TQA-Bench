@@ -143,6 +143,9 @@ def executePython(code: str):
     """
     Execute the given Python code in a sandboxed environment.
     You may create variables, modify variables, modify the database through the tables variable, and read them back through the other tools.
+    You must print the results to stdout in order to see them.
+    A tables variable is already set up for you, so do not create a new variable by hardcoding values into the environment.
+    You should never need to manually create a new variable for the database.
     
     Args:
         code (str): Python code to execute. Must be a valid Python string.
@@ -414,7 +417,7 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
             if "name" in tool_call and "arguments" in tool_call:
                 tool_calls.append(tool_call)
         except json.JSONDecodeError as e:
-            tqdm.write(f"❌ JSON parse error: {e}. Violating character: `{e.doc[e.pos]}`", nolock=True)
+            tqdm.write(f"❌ JSON parse error: {e}. Violating characters: `{e.doc[e.pos-1:e.pos+1]}`", nolock=True)
             # Create a failed tool call entry so it gets counted
             try:
                 # Try to extract just the tool name for error reporting
@@ -429,14 +432,14 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
                     start_pos = max(0, e.pos - 20)
                     end_pos = min(len(match), e.pos + 20)
                     error_snippet = match[start_pos:end_pos]
-                    error_char = e.doc[e.pos]
+                    error_chars = e.doc[e.pos-1:e.pos+1]
                     
                     failed_tool_call = {
                         "name": tool_name,
                         "arguments": {},
                         "parse_error": error_msg,
                         "snippet": error_snippet,
-                        "error_char": error_char
+                        "error_chars": error_chars
                     }
                     tool_calls.append(failed_tool_call)
             except Exception as e2:
@@ -485,7 +488,7 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     Runs one inference via llama.cpp with tools and returns the formatted completion string.
     """
     # Log start of new request
-    tqdm.write("🚀 STARTING NEW REQUEST", nolock=True)
+    tqdm.write("\n🚀 STARTING NEW REQUEST", nolock=True)
     
     prompt = qaPrompt(dbStr, question, choices)
     max_tokens = 10000
@@ -619,7 +622,7 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
             
             # Check if this is a failed tool call due to JSON parsing
             if "parse_error" in tool_call:
-                result = f"Error: {tool_call['parse_error']}\n\nError Snippet: \n```\n{tool_call.get('snippet', 'Something went wrong')}\n```\nError Character: `{tool_call.get('error_char', 'Something went wrong')}`"
+                result = f"Error: {tool_call['parse_error']}\n\nError Snippet: \n```\n{tool_call.get('snippet', 'Something went wrong')}\n```\nError Characters: `{tool_call.get('error_chars', 'Something went wrong')}`\nThese errors are usually caused by using single quotes instead of double quotes or bad escaping.\n"
                 failed_tool_calls += 1
             else:
                 try:
