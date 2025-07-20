@@ -9,7 +9,8 @@ import sys
 import time
 from llama_cpp import Llama
 from llama_cpp.llama import StoppingCriteriaList
-from typing import Callable
+from typing import Callable, List
+from llama_cpp.llama_types import ChatCompletionRequestMessage
 import numpy as np
 import numpy.typing as npt
 from tqdm import tqdm
@@ -59,7 +60,7 @@ def qwenLlamaCppCall(dbStr, question, choices):
     Runs one inference via llama.cpp and returns the raw completion string.
     """
     prompt = qaPrompt(dbStr, question, choices)
-    max_tokens = 1000
+    max_tokens = 10000
 
     # Get model instance
     llm = get_model()
@@ -68,7 +69,7 @@ def qwenLlamaCppCall(dbStr, question, choices):
     token_pbar = tqdm(total=max_tokens, desc="      Tokens", position=4, leave=False, unit="tokens")
 
     # Create messages for chat completion
-    messages = [
+    messages: List[ChatCompletionRequestMessage] = [
         {"role": "user", "content": prompt}
     ]
 
@@ -91,8 +92,8 @@ def qwenLlamaCppCall(dbStr, question, choices):
 
     # Process the streaming response
     for chunk in response_stream:
-        if chunk["choices"][0]["delta"].get("content"):
-            content = chunk["choices"][0]["delta"]["content"]
+        if chunk["choices"][0]["delta"].get("content"): # type: ignore
+            content: str = chunk["choices"][0]["delta"]["content"] # type: ignore
             full_response += content
             token_count += 1
             token_pbar.n = token_count
@@ -109,7 +110,11 @@ def qwenLlamaCppCall(dbStr, question, choices):
     return full_response.strip(), input_tokens, output_tokens
 
 if __name__ == '__main__':
-    # Example usage for interactive testing
+    # Cache the model
+    get_model()
+    print("Model cached\n\n")
+    
+    # Interactive mode
     if len(sys.argv) > 1 and (sys.argv[1] == "--interactive" or sys.argv[1] == "interactive"):
         print("Qwen2.5-7B-Instruct Chat (llama.cpp)")
         print("Loading model...")
@@ -123,7 +128,7 @@ if __name__ == '__main__':
                 break
             
             # Create messages for chat completion
-            messages = [
+            messages: List[ChatCompletionRequestMessage] = [
                 {"role": "user", "content": user_input}
             ]
             
@@ -148,8 +153,8 @@ if __name__ == '__main__':
                 
                 # Process the streaming response
                 for chunk in response_stream:
-                    if chunk["choices"][0]["delta"].get("content"):
-                        content = chunk["choices"][0]["delta"]["content"]
+                    if chunk["choices"][0]["delta"].get("content"): # type: ignore
+                        content: str = chunk["choices"][0]["delta"]["content"] # type: ignore
                         full_response += content
                         token_count += 1
                         print(content, end="", flush=True)
@@ -174,7 +179,7 @@ if __name__ == '__main__':
                 #     timeSleep = 30
                 # elif scale == '32k':
                 #     timeSleep = 60
-                tc.testAll('Qwen2.5-7B-Instruct-LlamaCpp', # The model name saved in taskPath
+                tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
                         k, # dataset
                         scale, # 8k, 16k, 32k, 64k, 128k
                         False, # if use markdown
@@ -183,7 +188,7 @@ if __name__ == '__main__':
                         14, # questionLimit, 14 is ok
                         qwenLlamaCppCall,
                         timeSleep)
-                tc.testAll('Qwen2.5-7B-Instruct-LlamaCpp', # The model name saved in taskPath
+                tc.testAll('Qwen2.5-7B-Instruct-Local', # The model name saved in taskPath
                         k, # dataset
                         scale, # 8k, 16k, 32k, 64k, 128k
                         True, # if use markdown

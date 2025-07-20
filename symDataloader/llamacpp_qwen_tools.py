@@ -9,9 +9,10 @@ import sys
 import time
 import json
 import re
+import inspect
 from llama_cpp import Llama
-from llama_cpp.llama import StoppingCriteriaList
 from typing import Callable, Dict, List, Any
+from llama_cpp.llama_types import ChatCompletionRequestMessage, ChatCompletionRequestToolMessage, ChatCompletionTool
 import numpy as np
 import numpy.typing as npt
 from tqdm import tqdm
@@ -35,13 +36,11 @@ def getTableNames():
     """
     Retrieve all table names in the database.
     """
-    tqdm.write("🔧 ENTERING TOOL: getTableNames", nolock=True)
     try:
         result = f"The database contains {len(dbDataFrames)} tables: {', '.join(dbDataFrames.keys())}."
-        tqdm.write("🔧 EXITING TOOL: getTableNames", nolock=True)
         return result
     except Exception as e:
-        tqdm.write(f"🔧 ERROR IN TOOL getTableNames: {e}", nolock=True)
+        tqdm.write(f"⚠️ ERROR IN TOOL getTableNames: {e}", nolock=True)
         raise
 
 def peekTables(tableNames: list[str]):
@@ -51,11 +50,9 @@ def peekTables(tableNames: list[str]):
     Args:
         tableNames (list[str]): A list of table names to peek.
     """
-    tqdm.write("🔧 ENTERING TOOL: peekTables", nolock=True)
     try:
         if not tableNames:
             result = "No table names provided."
-            tqdm.write("🔧 EXITING TOOL: peekTables", nolock=True)
             return result
         
         # Validate table names
@@ -99,27 +96,47 @@ def peekTables(tableNames: list[str]):
                         result_parts.append(f"  (All {total_rows} rows shown)")
         
         result = '\n'.join(result_parts)
-        tqdm.write("🔧 EXITING TOOL: peekTables", nolock=True)
         return result
     except Exception as e:
-        tqdm.write(f"🔧 ERROR IN TOOL peekTables: {e}", nolock=True)
+        tqdm.write(f"⚠️ ERROR IN TOOL peekTables: {e}", nolock=True)
         raise
 
 def readTables(tableNames: list[str]):
     """
     Read the given table names and return the entire data as a string.
+    If none provided or non-existent table provided, warn in return result.
     """
-    tqdm.write("🔧 ENTERING TOOL: readTables", nolock=True)
     try:
-        tableList = []
-        for tableName, df in dbDataFrames.items():
-            tableStr = df.to_csv(index=False)
-            tableList.append(f'## {tableName}\n\n{tableStr}')
-        result = '\n\n'.join(tableList)
-        tqdm.write("🔧 EXITING TOOL: readTables", nolock=True)
+        if not tableNames:
+            result = "No table names provided."
+            return result
+
+        valid_tables = []
+        invalid_tables = []
+        for tableName in tableNames:
+            if tableName in dbDataFrames:
+                valid_tables.append(tableName)
+            else:
+                invalid_tables.append(tableName)
+
+        result_parts = []
+
+        if invalid_tables:
+            result_parts.append(f"Invalid table names: {', '.join(invalid_tables)}")
+
+        if valid_tables:
+            for tableName in valid_tables:
+                df = dbDataFrames[tableName]
+                tableStr = df.to_csv(index=False)
+                result_parts.append(f'## {tableName}\n\n{tableStr}')
+        else:
+            if not result_parts:
+                result_parts.append("No valid table names provided.")
+
+        result = '\n\n'.join(result_parts)
         return result
     except Exception as e:
-        tqdm.write(f"🔧 ERROR IN TOOL readTables: {e}", nolock=True)
+        tqdm.write(f"⚠️ ERROR IN TOOL readTables: {e}", nolock=True)
         raise
 
 def executePython(code: str):
@@ -176,8 +193,10 @@ def executePython(code: str):
         - No ability to import dangerous modules
         - Execution times out after 2 minutes
     """
-    tqdm.write("🔧 ENTERING TOOL: executePython", nolock=True)
     try:
+        # Print the code in a code block
+        tqdm.write(f"\n```python\n{code}\n```\n", nolock=True)
+        
         import builtins
         import sys
         import io
@@ -259,51 +278,93 @@ def executePython(code: str):
             result_parts.append("Code executed successfully with no output.")
         
         final_result = '\n'.join(result_parts)
-        tqdm.write("🔧 EXITING TOOL: executePython", nolock=True)
         return final_result
         
     except Exception as e:
-        tqdm.write(f"🔧 ERROR IN TOOL executePython: {e}", nolock=True)
+        tqdm.write(f"⚠️ ERROR IN TOOL executePython: {e}", nolock=True)
         raise
 
-# Tool registry
-TOOLS = {
-    "getTableNames": {
-        "function": getTableNames,
-        "description": "Retrieve all table names in the database.",
-        "parameters": {}
-    },
-    "peekTables": {
-        "function": peekTables,
-        "description": "Peek the first 5 rows of each of the given table names.",
-        "parameters": {
-            "tableNames": {
-                "type": "list[str]",
-                "description": "A list of table names to peek."
+# Tool registry - array of functions
+TOOLS = [getTableNames, peekTables, readTables, executePython]
+
+def _convert_type_to_json_schema(param_type: Any) -> dict:
+    """Convert Python type annotation to JSON schema type."""
+    # Handle direct type classes
+    if param_type == str:
+        return {"type": "string"}
+    elif param_type == int or param_type == float:
+        return {"type": "number"}
+    
+    # Handle string representations for complex types
+    type_str = str(param_type)
+    
+    if type_str.startswith('list[') or type_str.startswith('List['):
+        # Extract the inner type
+        start_idx = type_str.find('[') + 1
+        end_idx = type_str.rfind(']')
+        if start_idx > 0 and end_idx > start_idx:
+            inner_type = type_str[start_idx:end_idx]
+            if inner_type in ['str', 'string']:
+                return {"type": "array", "items": {"type": "string"}}
+            elif inner_type in ['int', 'float', 'number']:
+                return {"type": "array", "items": {"type": "number"}}
+            else:
+                raise ValueError(f"Unsupported array type: {inner_type}")
+        else:
+            raise ValueError(f"Invalid list type format: {type_str}")
+    else:
+        raise ValueError(f"Unsupported type: {type_str}")
+
+def generate_tools_schema() -> List[ChatCompletionTool]:
+    """Generate ChatCompletionTool list from TOOLS array."""
+    tools_schema = []
+    
+    for tool_func in TOOLS:
+        # Get function signature
+        sig = inspect.signature(tool_func)
+        
+        # Get docstring
+        description = inspect.getdoc(tool_func)
+        if description is None:
+            raise ValueError(f"Function {tool_func.__name__} has no docstring")
+        
+        # Build parameters schema
+        properties = {}
+        required = []
+        
+        for param_name, param in sig.parameters.items():
+            if param_name == 'self':  # Skip self parameter
+                continue
+                
+            param_type = param.annotation
+            if param_type == inspect.Parameter.empty:
+                raise ValueError(f"Parameter {param_name} in {tool_func.__name__} has no type annotation")
+            
+            try:
+                properties[param_name] = _convert_type_to_json_schema(param_type)
+                required.append(param_name)  # All args are required
+            except ValueError as e:
+                raise ValueError(f"Parameter {param_name} in {tool_func.__name__}: {e}")
+        
+        tool_schema = {
+            "type": "function",
+            "function": {
+                "name": tool_func.__name__,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
             }
         }
-    },
-    "readTables": {
-        "function": readTables,
-        "description": "Read the given table names and return the entire data as a string.",
-        "parameters": {
-            "tableNames": {
-                "type": "list[str]",
-                "description": "A list of table names to read."
-            }
-        }
-    },
-    "executePython": {
-        "function": executePython,
-        "description": "Execute Python code in a sandboxed environment with access to the database tables.",
-        "parameters": {
-            "code": {
-                "type": "str",
-                "description": "Python code to execute."
-            }
-        }
-    }
-}
+        
+        tools_schema.append(tool_schema)
+    
+    return tools_schema
+
+# Generate tools schema at startup
+TOOLS_DEFINITION = generate_tools_schema()
 
 # ---------------------------------------------------------------------------
 # 3. One global model handle (re-used for every call)
@@ -343,10 +404,16 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
     
     for match in matches:
         try:
-            tool_call = json.loads(match)
+            # Clean up the match - remove any extra braces or formatting
+            cleaned_match = match.strip()
+            # Handle double braces if present
+            if cleaned_match.startswith('{{') and cleaned_match.endswith('}}'):
+                cleaned_match = cleaned_match[1:-1]
+            
+            tool_call = json.loads(cleaned_match)
             if "name" in tool_call and "arguments" in tool_call:
                 tool_calls.append(tool_call)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             continue
     
     return tool_calls
@@ -356,11 +423,17 @@ def execute_tool_call(tool_call: Dict[str, Any]) -> str:
     tool_name = tool_call.get("name")
     arguments = tool_call.get("arguments", {})
     
-    if tool_name not in TOOLS:
+    # Find the tool function in the TOOLS array
+    tool_func = None
+    for func in TOOLS:
+        if func.__name__ == tool_name:
+            tool_func = func
+            break
+    
+    if tool_func is None:
         return f"Error: Unknown tool '{tool_name}'"
     
     try:
-        tool_func = TOOLS[tool_name]["function"]
         result = tool_func(**arguments)
         return str(result)
     except Exception as e:
@@ -380,10 +453,13 @@ def qaPrompt(dbStr, question, choices):
 # ---------------------------------------------------------------------------
 def qwenLlamaCppToolsCall(dbStr, question, choices):
     """
-    Runs one inference via llama.cpp with tools and returns the raw completion string.
+    Runs one inference via llama.cpp with tools and returns the formatted completion string.
     """
+    # Log start of new request
+    tqdm.write("🚀 STARTING NEW REQUEST", nolock=True)
+    
     prompt = qaPrompt(dbStr, question, choices)
-    max_tokens = 1000
+    max_tokens = 10000
     max_rounds = 5  # Limit tool calling rounds
     
     # Get model instance
@@ -402,9 +478,17 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     total_input_tokens = 0
     total_output_tokens = 0
     current_round = 0
+    formatted_response = ""  # Build formatted response live
+    count_tool_calls = 0
+    failed_tool_calls = 0  # Track failed tool calls
+    
+    # Debug variables
+    start_time = time.time()
+    last_debug_write = start_time
+    debugPath = 'symDataset/results/TableQA/llamacpp_qwen2.5_tools_debug.txt'
     
     # Build the full conversation context
-    conversation = [
+    conversation: List[ChatCompletionRequestMessage] = [
         {"role": "system", "content": "You have access to tools to analyze database tables. Use them when needed to answer questions accurately."},
         {"role": "user", "content": prompt}
     ]
@@ -417,6 +501,8 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
         # Use create_chat_completion with the conversation
         response_stream = llm.create_chat_completion(
             messages=conversation,
+            tools=TOOLS_DEFINITION,
+            tool_choice="auto",
             max_tokens=max_tokens,
             temperature=0.6,
             top_p=0.95,
@@ -429,19 +515,51 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
         # Process the streaming response
         response_text = ""
         token_count = 0
+        first_token_received = False
         
         for chunk in response_stream:
-            if chunk["choices"][0]["delta"].get("content"):
-                content = chunk["choices"][0]["delta"]["content"]
+            if chunk["choices"][0]["delta"].get("content"): # type: ignore
+                content: str = chunk["choices"][0]["delta"]["content"] # type: ignore
                 response_text += content
+                formatted_response += content
                 token_count += 1
-                token_pbar.n = token_count
+                
+                # Reset progress bar on first token to exclude initial latency (time to first token)
+                if not first_token_received:
+                    token_pbar.reset()
+                    token_pbar.n = 1
+                    first_token_received = True
+                else:
+                    token_pbar.n = token_count
                 token_pbar.refresh()
+                
+                # Check if we should write to debug file
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                
+                # If it's been at least 10 seconds since last write
+                if (current_time - last_debug_write) >= 10:
+                    try:
+                        with open(debugPath, 'w', encoding='utf-8') as f:
+                            f.write(f"--- DEBUG WRITE AT {time.strftime('%H:%M:%S')} (ELAPSED: {elapsed_time:.1f}s) ---\n")
+                            f.write(f"Token count: {token_count}\n")
+                            f.write(f"Current round: {current_round}\n")
+                            f.write(f"\n{formatted_response}\n")
+                            f.write("--- END DEBUG WRITE ---\n")
+                        last_debug_write = current_time
+                    except Exception as e:
+                        # Silently fail if debug writing fails
+                        pass
         
-        # For streaming responses, we need to estimate token counts
-        # Since we can't get usage from stream chunks, we'll use our manual count
-        input_tokens = len(llm.tokenize(prompt.encode())) if current_round == 0 else 0
-        output_tokens = token_count
+        # Count input tokens for this round (all messages in conversation)
+        conversation_text = ""
+        for msg in conversation:
+            if msg["role"] in ["user", "system"]:
+                msg_content = msg.get("content", "")
+                if msg_content:
+                    conversation_text += str(msg_content) + "\n"
+        input_tokens = len(llm.tokenize(conversation_text.encode()))
+        output_tokens = len(llm.tokenize(response_text.encode()))
         
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
@@ -457,17 +575,35 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
             # No tool calls, we're done
             break
         
-        # Execute tool calls
+        # Execute tool calls and append results live
         tool_results = []
-        for tool_call in tool_calls:
+        for i, tool_call in enumerate(tool_calls):
+            count_tool_calls += 1
             tool_name = tool_call["name"]
             tqdm.write(f"🔧 EXECUTING TOOL: {tool_name}", nolock=True)
-            result = execute_tool_call(tool_call)
+            try:
+                result = execute_tool_call(tool_call)
+                if result.startswith("Error"):
+                    failed_tool_calls += 1
+            except Exception as e:
+                result = f"Error executing {tool_name}: {str(e)}"
+                failed_tool_calls += 1
+            
+            # Append tool call and result to formatted response
+            formatted_response += f"\n\n🔧 Tool Name: {tool_name}\n"
+            formatted_response += f"🔧 Tool Args: {tool_call.get('arguments', {})}\n"
+            formatted_response += f"🔧 Tool Output: {result}\n"
+            
             tool_results.append(format_tool_result(tool_name, result))
         
-        # Add tool results to conversation
+        # Add tool results to conversation with proper format
         tool_response = "\n".join(tool_results)
-        conversation.append({"role": "tool", "content": tool_response})
+        tool_message: ChatCompletionRequestToolMessage = {
+            "role": "tool", 
+            "content": tool_response,
+            "tool_call_id": f"call_{current_round}_{i}"  # Generate a unique tool call ID
+        }
+        conversation.append(tool_message)
         
         current_round += 1
     
@@ -475,22 +611,52 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     round_pbar.close()
     token_pbar.close()
     
-    return full_response.strip(), total_input_tokens, total_output_tokens
+    # Add debug information at the end
+    debug_info = f"\n\nDebug: "
+    if current_round >= max_rounds:
+        debug_info += f"Exceeded max tool calls ({max_rounds} rounds). "
+    debug_info += f"Failed tool calls: {failed_tool_calls} / {count_tool_calls}"
+    
+    formatted_response += debug_info
+    
+    return formatted_response.strip(), total_input_tokens, total_output_tokens
 
 if __name__ == '__main__':
+    # Cache the model
+    get_model()
+    print("Model cached\n\n")
+    
     # Check for interactive mode
     if len(sys.argv) > 1 and (sys.argv[1] == "--interactive" or sys.argv[1] == "interactive"):
         tqdm.write("🔧 INTERACTIVE MODE ENABLED", nolock=True)
         tqdm.write("You can now ask questions directly. Type 'quit' or 'exit' to stop.", nolock=True)
+        tqdm.write("You have access to tools: getTableNames, peekTables, readTables, executePython", nolock=True)
         tqdm.write("=" * 50, nolock=True)
         
         # Initialize empty database object for interactive mode
         empty_db = {}
+        dbDataFrames = empty_db
+        
+        # Add a dummy table for testing
+        import pandas as pd
+        dummy_data = {
+            'id': [1, 2, 3, 4, 5, 6],
+            'name': ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank'],
+            'age': [25, 30, 35, 28, 32, 36],
+            'city': ['New York', 'Los Angeles', 'Chicago', 'Boston', 'Seattle', 'Miami'],
+            'salary': [50000, 60000, 70000, 55000, 65000, 75000]
+        }
+        dbDataFrames['employees'] = pd.DataFrame(dummy_data)
+        
+        # Initialize conversation history for multi-turn
+        conversation: List[ChatCompletionRequestMessage] = [
+            {"role": "system", "content": "You are a helpful AI assistant with access to tools. You can analyze database tables and execute Python code when needed. Always be helpful and accurate in your responses."}
+        ]
         
         while True:
             try:
                 # Get user question
-                question = input("\nYour question: ").strip()
+                question = input("\n💬 User: ").strip()
                 
                 # Check for exit commands
                 if question.lower() in ['quit', 'exit', 'q']:
@@ -501,21 +667,95 @@ if __name__ == '__main__':
                     tqdm.write("Please enter a question.", nolock=True)
                     continue
                 
-                tqdm.write(f"\nProcessing: {question}", nolock=True)
-                tqdm.write("-" * 50, nolock=True)
+                print("-" * 10)
                 
-                # Set up interactive parameters
-                dbStr = empty_db
-                choices = "This is a user question, you do not need to format as a multiple choice question, just answer the query directly."
+                # Add user message to conversation
+                conversation.append({"role": "user", "content": question})
                 
-                # Call the model
-                response, input_tokens, output_tokens = qwenLlamaCppToolsCall(dbStr, question, choices)
+                # Get model instance
+                llm = get_model()
                 
-                tqdm.write("\nResponse:", nolock=True)
-                tqdm.write("=" * 50, nolock=True)
-                tqdm.write(response, nolock=True)
-                tqdm.write("=" * 50, nolock=True)
-                tqdm.write(f"Tokens: {input_tokens} input, {output_tokens} output", nolock=True)
+                # Variables to track results
+                total_input_tokens = 0
+                total_output_tokens = 0
+                current_round = 0
+                max_rounds = 5
+                
+                # Tool calling loop
+                while current_round < max_rounds:
+                    # Use create_chat_completion with the conversation and tools
+                    response_stream = llm.create_chat_completion(
+                        messages=conversation,
+                        tools=TOOLS_DEFINITION,
+                        tool_choice="auto",
+                        max_tokens=1000,
+                        temperature=0.6,
+                        top_p=0.95,
+                        top_k=20,
+                        repeat_penalty=1.1,
+                        stream=True,
+                        stop=["I AM DONE"]
+                    )
+                    
+                    # Process the streaming response
+                    response_text = ""
+                    token_count = 0
+                    
+                    print("🤖 Assistant: ", end="", flush=True)
+                    
+                    for chunk in response_stream:
+                        if chunk["choices"][0]["delta"].get("content"): # type: ignore
+                            content: str = chunk["choices"][0]["delta"]["content"] # type: ignore
+                            response_text += content
+                            print(content, end="", flush=True)
+                            token_count += 1
+                    
+                    print()  # New line after assistant response
+                    
+                    # Use actual tokenization for accurate counts
+                    input_tokens = len(llm.tokenize(question.encode())) if current_round == 0 else 0
+                    output_tokens = len(llm.tokenize(response_text.encode()))
+                    
+                    total_input_tokens += input_tokens
+                    total_output_tokens += output_tokens
+                    
+                    # Add assistant response to conversation
+                    conversation.append({"role": "assistant", "content": response_text})
+                    
+                    # Check for tool calls
+                    tool_calls = extract_tool_calls(response_text)
+                    
+                    if not tool_calls:
+                        # No tool calls, we're done - this is the final response
+                        break
+                    
+                    # Execute tool calls
+                    tool_results = []
+                    for i, tool_call in enumerate(tool_calls):
+                        tool_name = tool_call["name"]
+                        print("-" * 10)
+                        print(f"🔧 Tool Name: {tool_name}")
+                        print(f"🔧 Tool Args: {tool_call.get('arguments', {})}")
+                        
+                        result = execute_tool_call(tool_call)
+                        print(f"🔧 Tool Output: {result}")
+                        print("-" * 10)
+                        
+                        tool_results.append(format_tool_result(tool_name, result))
+                    
+                    # Add tool results to conversation with proper format
+                    tool_response = "\n".join(tool_results)
+                    tool_message: ChatCompletionRequestToolMessage = {
+                        "role": "tool", 
+                        "content": tool_response,
+                        "tool_call_id": f"call_{current_round}_{i}"  # Generate a unique tool call ID
+                    }
+                    conversation.append(tool_message)
+                    
+                    current_round += 1
+                
+                print(f"📊 Tokens: {total_input_tokens} input, {total_output_tokens} output")
+                print("-" * 10)
                 
             except KeyboardInterrupt:
                 tqdm.write("\nInterrupted by user. Goodbye!", nolock=True)
@@ -538,7 +778,7 @@ if __name__ == '__main__':
                 #     timeSleep = 30
                 # elif scale == '32k':
                 #     timeSleep = 60
-                tc.testAll('Qwen2.5-7B-Instruct-LlamaCpp-Tools', # The model name saved in taskPath
+                tc.testAll('Qwen2.5-7B-Instruct-Local-Tools', # The model name saved in taskPath
                         k, # dataset
                         scale, # 8k, 16k, 32k, 64k, 128k
                         False, # if use markdown
