@@ -414,6 +414,35 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
             if "name" in tool_call and "arguments" in tool_call:
                 tool_calls.append(tool_call)
         except json.JSONDecodeError as e:
+            tqdm.write(f"❌ JSON parse error: {e}. Violating character: `{e.doc[e.pos]}`", nolock=True)
+            # Create a failed tool call entry so it gets counted
+            try:
+                # Try to extract just the tool name for error reporting
+                name_match = re.search(r'"name":\s*"([^"]+)"', match)
+                if name_match:
+                    tool_name = name_match.group(1)
+                    
+                    # Create dynamic error message based on JSONDecodeError properties
+                    error_msg = f"JSON parsing for tool call {tool_name} failed: {e.msg}"
+                    
+                    # Extract the problematic snippet around the error position
+                    start_pos = max(0, e.pos - 20)
+                    end_pos = min(len(match), e.pos + 20)
+                    error_snippet = match[start_pos:end_pos]
+                    error_char = e.doc[e.pos]
+                    
+                    failed_tool_call = {
+                        "name": tool_name,
+                        "arguments": {},
+                        "parse_error": error_msg,
+                        "snippet": error_snippet,
+                        "error_char": error_char
+                    }
+                    tool_calls.append(failed_tool_call)
+            except Exception as e2:
+                # If we can't even extract the name, skip it
+                tqdm.write(f"❌ JSON parse error handler failed with error: {e2}", nolock=True)
+                pass
             continue
     
     return tool_calls
@@ -460,7 +489,7 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     
     prompt = qaPrompt(dbStr, question, choices)
     max_tokens = 10000
-    max_rounds = 5  # Limit tool calling rounds
+    max_rounds = 10  # Limit tool calling rounds
     
     # Get model instance
     llm = get_model()
@@ -502,7 +531,7 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
         response_stream = llm.create_chat_completion(
             messages=conversation,
             tools=TOOLS_DEFINITION,
-            tool_choice="auto",
+            tool_choice="auto" if current_round < max_rounds - 1 else None,
             max_tokens=max_tokens,
             temperature=0.6,
             top_p=0.95,
@@ -516,6 +545,7 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
         response_text = ""
         token_count = 0
         first_token_received = False
+        finish_reason = None
         
         for chunk in response_stream:
             if chunk["choices"][0]["delta"].get("content"): # type: ignore
@@ -550,6 +580,11 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
                     except Exception as e:
                         # Silently fail if debug writing fails
                         pass
+            
+            # Capture finish reason from the last chunk
+            if chunk["choices"][0].get("finish_reason"): # type: ignore
+                finish_reason = chunk["choices"][0]["finish_reason"] # type: ignore
+        tqdm.write(f"🛑 PAUSED. {finish_reason}")
         
         # Count input tokens for this round (all messages in conversation)
         conversation_text = ""
@@ -581,13 +616,19 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
             count_tool_calls += 1
             tool_name = tool_call["name"]
             tqdm.write(f"🔧 EXECUTING TOOL: {tool_name}", nolock=True)
-            try:
-                result = execute_tool_call(tool_call)
-                if result.startswith("Error"):
-                    failed_tool_calls += 1
-            except Exception as e:
-                result = f"Error executing {tool_name}: {str(e)}"
+            
+            # Check if this is a failed tool call due to JSON parsing
+            if "parse_error" in tool_call:
+                result = f"Error: {tool_call['parse_error']}\n\nError Snippet: \n```\n{tool_call.get('snippet', 'Something went wrong')}\n```\nError Character: `{tool_call.get('error_char', 'Something went wrong')}`"
                 failed_tool_calls += 1
+            else:
+                try:
+                    result = execute_tool_call(tool_call)
+                    if result.startswith("Error"):
+                        failed_tool_calls += 1
+                except Exception as e:
+                    result = f"Error executing {tool_name}: {str(e)}"
+                    failed_tool_calls += 1
             
             # Append tool call and result to formatted response
             formatted_response += f"\n\n🔧 Tool Name: {tool_name}\n"
@@ -613,11 +654,14 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     
     # Add debug information at the end
     debug_info = f"\n\nDebug: "
-    if current_round >= max_rounds:
-        debug_info += f"Exceeded max tool calls ({max_rounds} rounds). "
-    debug_info += f"Failed tool calls: {failed_tool_calls} / {count_tool_calls}"
+    debug_info += f" Failed tool calls: {failed_tool_calls} / {count_tool_calls}"
+    if finish_reason:
+        debug_info += f" Stop reason: {finish_reason}. Used {current_round} of {max_rounds} rounds"
     
     formatted_response += debug_info
+
+    # Log finish reason
+    tqdm.write(f"🛑 FINISHED. Used {current_round} of {max_rounds} rounds. {finish_reason}")
     
     return formatted_response.strip(), total_input_tokens, total_output_tokens
 
