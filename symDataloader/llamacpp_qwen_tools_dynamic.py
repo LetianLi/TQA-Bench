@@ -1,6 +1,16 @@
 """
 Wrapper for Qwen2.5-7B-Instruct using llama.cpp directly with tools.
 
+This is the dynamic version, in that there is no explicit python tool, but instead code blocks are executed.
+LLM response for tool call is prefilled with:
+``python
+import pandas as pd
+import numpy as np
+tables: dict[str, pd.DataFrame] = getAllTables()
+
+We use the stop string "``python" which is not returned from chat completion.
+We determine chat completion is python if the last character is the leftover single backtick.
+
 Use `uv sync` to install the dependencies.
 """
 
@@ -141,6 +151,15 @@ def readTables(tableNames: list[str]):
 
 def executePython(code: str):
     """
+    This is a dummy tool that will not actually execute python code.
+    To execute python code, use a python code block which will be automatically executed.
+    Inside the python code block, you must print the results to stdout in order to see them.
+    """
+    return "Python code execution cannot be done by an explicit tool call. Use a python code block instead. Remember to print the results to stdout in order to see them."
+
+# This is actually the code executor
+def executePythonCode(code: str):
+    """
     Execute the given Python code in a sandboxed environment.
     You may create variables, modify variables, modify the database through the tables variable, and read them back through the other tools.
     You must print the results to stdout in order to see them.
@@ -278,7 +297,7 @@ def executePython(code: str):
             result_parts.append(f"ERROR:\n{error_message}")
         
         if not result_parts:
-            result_parts.append("Code executed successfully with no output.")
+            result_parts.append("Code executed successfully with no output. If you wanted to see output, you must print it to stdout.")
         
         final_result = '\n'.join(result_parts)
         return final_result
@@ -288,7 +307,7 @@ def executePython(code: str):
         raise
 
 # Tool registry - array of functions
-TOOLS = [getTableNames, peekTables, readTables, executePython]
+TOOLS = [getTableNames, peekTables, readTables, executePython] # executePython is a dummy tool.
 
 def _convert_type_to_json_schema(param_type: Any) -> dict:
     """Convert Python type annotation to JSON schema type."""
@@ -450,6 +469,25 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
     
     return tool_calls
 
+def extract_python_blocks(text: str) -> List[str]:
+    """Extract Python code blocks from the model's response."""
+    python_blocks = []
+    
+    # Look for Python code blocks like:
+    # ```python
+    # code here
+    # ```
+    python_pattern = r'```python\s*\n(.*?)\n```'
+    matches = re.findall(python_pattern, text, re.DOTALL)
+    
+    for match in matches:
+        # Clean up the code block
+        code = match.strip()
+        if code:
+            python_blocks.append(code)
+    
+    return python_blocks
+
 def execute_tool_call(tool_call: Dict[str, Any]) -> str:
     """Execute a single tool call and return the result."""
     tool_name = tool_call.get("name")
@@ -521,7 +559,7 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     
     # Build the full conversation context
     conversation: List[ChatCompletionRequestMessage] = [
-        {"role": "system", "content": "You have access to tools to analyze database tables. Use them when needed to answer questions accurately. Tools must be json-serializablem and so they must use double quotes"},
+        {"role": "system", "content": "You have access to tools to analyze database tables. Use them when needed to answer questions accurately. Tools must be json-serializable and so they must use double quotes. Additionally, any Python code blocks you include in your response (marked with ```python) will be automatically executed, but you must print results to stdout to view output. You can use this to perform data analysis, create visualizations, or manipulate the database tables directly."},
         {"role": "user", "content": prompt}
     ]
     
@@ -606,15 +644,18 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
         # Add assistant response to conversation
         conversation.append({"role": "assistant", "content": response_text})
         
-        # Check for tool calls
+        # Check for tool calls and Python code blocks
         tool_calls = extract_tool_calls(response_text)
+        python_blocks = extract_python_blocks(response_text)
         
-        if not tool_calls:
-            # No tool calls, we're done
+        if not tool_calls and not python_blocks:
+            # No tool calls or Python blocks, we're done
             break
         
-        # Execute tool calls and append results live
+        # Execute tool calls and Python blocks, append results live
         tool_results = []
+        
+        # Execute tool calls
         for i, tool_call in enumerate(tool_calls):
             count_tool_calls += 1
             tool_name = tool_call["name"]
@@ -639,6 +680,25 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
             formatted_response += f"🔧 Tool Output: {result}\n"
             
             tool_results.append(format_tool_result(tool_name, result))
+        
+        # Execute Python code blocks
+        for i, python_code in enumerate(python_blocks):
+            count_tool_calls += 1
+            tqdm.write(f"🐍 EXECUTING PYTHON BLOCK {i+1}/{len(python_blocks)}", nolock=True)
+            
+            try:
+                result = executePythonCode(python_code)
+                if result.startswith("Error"):
+                    failed_tool_calls += 1
+            except Exception as e:
+                result = f"Error executing Python code: {str(e)}"
+                failed_tool_calls += 1
+            
+            # Append Python execution and result to formatted response
+            formatted_response += f"\n\n🐍 Python Block {i+1}:\n"
+            formatted_response += f"🐍 Output: {result}\n"
+            
+            tool_results.append(format_tool_result("python_execution", result))
         
         # Add tool results to conversation with proper format
         tool_response = "\n".join(tool_results)
@@ -677,7 +737,8 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and (sys.argv[1] == "--interactive" or sys.argv[1] == "interactive"):
         tqdm.write("🔧 INTERACTIVE MODE ENABLED", nolock=True)
         tqdm.write("You can now ask questions directly. Type 'quit' or 'exit' to stop.", nolock=True)
-        tqdm.write("You have access to tools: getTableNames, peekTables, readTables, executePython", nolock=True)
+        tqdm.write("You have access to tools: getTableNames, peekTables, readTables", nolock=True)
+        tqdm.write("Additionally, any Python code blocks (```python) will be automatically executed.", nolock=True)
         tqdm.write("=" * 50, nolock=True)
         
         # Initialize empty database object for interactive mode
@@ -697,7 +758,7 @@ if __name__ == '__main__':
         
         # Initialize conversation history for multi-turn
         conversation: List[ChatCompletionRequestMessage] = [
-            {"role": "system", "content": "You are a helpful AI assistant with access to tools. You can analyze database tables and execute Python code when needed. Always be helpful and accurate in your responses."}
+            {"role": "system", "content": "You are a helpful AI assistant with access to tools. You can analyze database tables and execute Python code when needed. Any Python code blocks you include in your response (marked with ```python) will be automatically executed, but you must print results to stdout to view output. Always be helpful and accurate in your responses."}
         ]
         
         while True:
@@ -769,15 +830,18 @@ if __name__ == '__main__':
                     # Add assistant response to conversation
                     conversation.append({"role": "assistant", "content": response_text})
                     
-                    # Check for tool calls
+                    # Check for tool calls and Python code blocks
                     tool_calls = extract_tool_calls(response_text)
+                    python_blocks = extract_python_blocks(response_text)
                     
-                    if not tool_calls:
-                        # No tool calls, we're done - this is the final response
+                    if not tool_calls and not python_blocks:
+                        # No tool calls or Python blocks, we're done - this is the final response
                         break
                     
-                    # Execute tool calls
+                    # Execute tool calls and Python blocks
                     tool_results = []
+                    
+                    # Execute tool calls
                     for i, tool_call in enumerate(tool_calls):
                         tool_name = tool_call["name"]
                         print("-" * 10)
@@ -789,6 +853,17 @@ if __name__ == '__main__':
                         print("-" * 10)
                         
                         tool_results.append(format_tool_result(tool_name, result))
+                    
+                    # Execute Python code blocks
+                    for i, python_code in enumerate(python_blocks):
+                        print("-" * 10)
+                        print(f"🐍 Python Block {i+1}:")
+                        
+                        result = executePythonCode(python_code)
+                        print(f"🐍 Output: {result}")
+                        print("-" * 10)
+                        
+                        tool_results.append(format_tool_result("python_execution", result))
                     
                     # Add tool results to conversation with proper format
                     tool_response = "\n".join(tool_results)
@@ -815,7 +890,7 @@ if __name__ == '__main__':
         # Default mode - run the original benchmark
         dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
         taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-        resultPath = 'symDataset/results/TableQA/llamacpp_qwen2.5_tools.sqlite' # result sqlite
+        resultPath = 'symDataset/results/TableQA/llamacpp_qwen2.5_tools_dynamic.sqlite' # result sqlite
         tc = TaskCore(dbRoot, taskPath, resultPath)
         for k in dataDict.keys():
             # for scale in ['8k', '16k', '32k', '64k']:
@@ -825,7 +900,7 @@ if __name__ == '__main__':
                 #     timeSleep = 30
                 # elif scale == '32k':
                 #     timeSleep = 60
-                tc.testAll('Qwen2.5-7B-Instruct-Local-Tools', # The model name saved in taskPath
+                tc.testAll('Qwen2.5-7B-Instruct-Local-Tools-Dynamic', # The model name saved in taskPath
                         k, # dataset
                         scale, # 8k, 16k, 32k, 64k, 128k
                         False, # if use markdown

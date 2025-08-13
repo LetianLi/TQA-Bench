@@ -1,5 +1,5 @@
 """
-Wrapper for Qwen2.5-7B-Instruct using llama.cpp directly with tools.
+Wrapper for Qwen2.5-7B-Instruct using tool guidance with llama.cpp backend.
 
 Use `uv sync` to install the dependencies.
 """
@@ -11,8 +11,10 @@ import json
 import re
 import inspect
 from llama_cpp import Llama
+from guidance.chat import Qwen2dot5ChatTemplate
+from guidance.models import LlamaCpp
+from guidance import system, user, assistant, gen
 from typing import Callable, Dict, List, Any
-from llama_cpp.llama_types import ChatCompletionRequestMessage, ChatCompletionRequestToolMessage, ChatCompletionTool
 import numpy as np
 import numpy.typing as npt
 from tqdm import tqdm
@@ -318,8 +320,8 @@ def _convert_type_to_json_schema(param_type: Any) -> dict:
     else:
         raise ValueError(f"Unsupported type: {type_str}")
 
-def generate_tools_schema() -> List[ChatCompletionTool]:
-    """Generate ChatCompletionTool list from TOOLS array."""
+def generate_tools_schema() -> List[Dict]:
+    """Generate tools schema from TOOLS array."""
     tools_schema = []
     
     for tool_func in TOOLS:
@@ -373,15 +375,27 @@ TOOLS_DEFINITION = generate_tools_schema()
 # 3. One global model handle (re-used for every call)
 # ---------------------------------------------------------------------------
 _MODEL = None
+_MODEL_TEMPLATE = None
 
 def get_model():
-    """Initialize and return the llama.cpp model instance."""
+    """Initialize and return the guidance LlamaCpp model instance."""
     global _MODEL
+    global _MODEL_TEMPLATE
     if _MODEL is None:
-        _MODEL = Llama.from_pretrained(
+        hf_model = Llama.from_pretrained(
             repo_id="Qwen/Qwen2.5-7B-Instruct-GGUF",
             filename="qwen2.5-7b-instruct-q5_k_m-00001-of-00002.gguf",
             additional_files=["qwen2.5-7b-instruct-q5_k_m-00002-of-00002.gguf"],
+            verbose=False
+        )
+        model_path = hf_model.model_path
+        del hf_model
+
+        _MODEL_TEMPLATE = Qwen2dot5ChatTemplate() # instance for getting stop sequence
+
+        _MODEL = LlamaCpp(
+            model=model_path,
+            chat_template=Qwen2dot5ChatTemplate, # requires class not instance
             n_gpu_layers=-1,  # Use all available GPU layers
             n_ctx=131072,  # Max context length 131072 tokens
             n_batch=512,  # Evaluation Batch Size 512
@@ -390,7 +404,11 @@ def get_model():
             use_mlock=True,  # Keep model in memory
             offload_kqv=True,  # Offload KV cache to GPU memory
             verbose=False
-        )
+        ).with_sampling_params({
+            "top_p": 0.95,
+            "top_k": 20,
+            "repetition_penalty": 1.1
+        })
     return _MODEL
 
 # ---------------------------------------------------------------------------
@@ -485,7 +503,7 @@ def qaPrompt(dbStr, question, choices):
 # ---------------------------------------------------------------------------
 def qwenLlamaCppToolsCall(dbStr, question, choices):
     """
-    Runs one inference via llama.cpp with tools and returns the formatted completion string.
+    Runs one inference via guidance with tools and returns the formatted completion string.
     """
     # Log start of new request
     tqdm.write("\n🚀 STARTING NEW REQUEST", nolock=True)
@@ -519,92 +537,48 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     last_debug_write = start_time
     debugPath = 'symDataset/results/TableQA/llamacpp_qwen2.5_tools_debug.txt'
     
-    # Build the full conversation context
-    conversation: List[ChatCompletionRequestMessage] = [
-        {"role": "system", "content": "You have access to tools to analyze database tables. Use them when needed to answer questions accurately. Tools must be json-serializablem and so they must use double quotes"},
-        {"role": "user", "content": prompt}
-    ]
+    # Create a fresh model instance for this conversation
+    llm_conversation = llm
+    
+    # Set up initial conversation using guidance context managers
+    with system():
+        llm_conversation += "You have access to tools to analyze database tables. Use them when needed to answer questions accurately. Tools must be json-serializable, and so they must use double quotes"
+    
+    with user():
+        llm_conversation += prompt
     
     # Tool calling loop
     while current_round < max_rounds:
         round_pbar.n = current_round
         round_pbar.refresh()
         
-        # Use create_chat_completion with the conversation
-        response_stream = llm.create_chat_completion(
-            messages=conversation,
-            tools=TOOLS_DEFINITION,
-            tool_choice="auto" if current_round < max_rounds - 1 else None,
-            max_tokens=max_tokens,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=20,
-            repeat_penalty=1.1,
-            stream=True,
-            stop=["I AM DONE"]
-        )
+        # Generate assistant response using guidance
+        with assistant():
+            # Generate response with stop sequence and max tokens
+            llm_conversation += gen(
+                name=f"response_{current_round}", 
+                max_tokens=max_tokens, 
+                temperature=0.6,
+                # stop=["I AM DONE", _MODEL_TEMPLATE.get_role_end()] # found that providing guidance with stop causes EOS not to work
+            )
         
-        # Process the streaming response
-        response_text = ""
-        token_count = 0
-        first_token_received = False
-        finish_reason = None
+        # Get the generated response
+        response_text = llm_conversation[f"response_{current_round}"]
         
-        for chunk in response_stream:
-            if chunk["choices"][0]["delta"].get("content"): # type: ignore
-                content: str = chunk["choices"][0]["delta"]["content"] # type: ignore
-                response_text += content
-                formatted_response += content
-                token_count += 1
-                
-                # Reset progress bar on first token to exclude initial latency (time to first token)
-                if not first_token_received:
-                    token_pbar.reset()
-                    token_pbar.n = 1
-                    first_token_received = True
-                else:
-                    token_pbar.n = token_count
-                token_pbar.refresh()
-                
-                # Check if we should write to debug file
-                current_time = time.time()
-                elapsed_time = current_time - start_time
-                
-                # If it's been at least 10 seconds since last write
-                if (current_time - last_debug_write) >= 10:
-                    try:
-                        with open(debugPath, 'w', encoding='utf-8') as f:
-                            f.write(f"--- DEBUG WRITE AT {time.strftime('%H:%M:%S')} (ELAPSED: {elapsed_time:.1f}s) ---\n")
-                            f.write(f"Token count: {token_count}\n")
-                            f.write(f"Current round: {current_round}\n")
-                            f.write(f"\n{formatted_response}\n")
-                            f.write("--- END DEBUG WRITE ---\n")
-                        last_debug_write = current_time
-                    except Exception as e:
-                        # Silently fail if debug writing fails
-                        pass
-            
-            # Capture finish reason from the last chunk
-            if chunk["choices"][0].get("finish_reason"): # type: ignore
-                finish_reason = chunk["choices"][0]["finish_reason"] # type: ignore
-        tqdm.write(f"🛑 PAUSED. {finish_reason}")
+        # Get token usage
+        input_tokens = llm_conversation._get_usage().input_tokens
+        output_tokens = llm_conversation._get_usage().output_tokens
         
-        # Count input tokens for this round (all messages in conversation)
-        conversation_text = ""
-        for msg in conversation:
-            if msg["role"] in ["user", "system"]:
-                msg_content = msg.get("content", "")
-                if msg_content:
-                    conversation_text += str(msg_content) + "\n"
-        input_tokens = len(llm.tokenize(conversation_text.encode()))
-        output_tokens = len(llm.tokenize(response_text.encode()))
-        
-        total_input_tokens += input_tokens
-        total_output_tokens += output_tokens
+        total_input_tokens += int(input_tokens)
+        total_output_tokens += int(output_tokens)
         full_response += response_text
+        formatted_response += response_text
         
-        # Add assistant response to conversation
-        conversation.append({"role": "assistant", "content": response_text})
+        # Update token progress bar
+        token_pbar.n = min(max_tokens, total_output_tokens)
+        token_pbar.refresh()
+        
+        tqdm.write(f"🛑 PAUSED. Round {current_round} complete")
         
         # Check for tool calls
         tool_calls = extract_tool_calls(response_text)
@@ -640,16 +614,30 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
             
             tool_results.append(format_tool_result(tool_name, result))
         
-        # Add tool results to conversation with proper format
+        # Add tool results to conversation using guidance
         tool_response = "\n".join(tool_results)
-        tool_message: ChatCompletionRequestToolMessage = {
-            "role": "tool", 
-            "content": tool_response,
-            "tool_call_id": f"call_{current_round}_{i}"  # Generate a unique tool call ID
-        }
-        conversation.append(tool_message)
+        with user():
+            llm_conversation += tool_response
         
         current_round += 1
+        
+        # Check if we should write to debug file
+        current_time = time.time()
+        elapsed_time = current_time - start_time
+        
+        # If it's been at least 10 seconds since last write
+        if (current_time - last_debug_write) >= 10:
+            try:
+                with open(debugPath, 'w', encoding='utf-8') as f:
+                    f.write(f"--- DEBUG WRITE AT {time.strftime('%H:%M:%S')} (ELAPSED: {elapsed_time:.1f}s) ---\n")
+                    f.write(f"Token count: {total_output_tokens}\n")
+                    f.write(f"Current round: {current_round}\n")
+                    f.write(f"\n{formatted_response}\n")
+                    f.write("--- END DEBUG WRITE ---\n")
+                last_debug_write = current_time
+            except Exception as e:
+                # Silently fail if debug writing fails
+                pass
     
     # Close progress bars
     round_pbar.close()
@@ -658,13 +646,12 @@ def qwenLlamaCppToolsCall(dbStr, question, choices):
     # Add debug information at the end
     debug_info = f"\n\nDebug: "
     debug_info += f" Failed tool calls: {failed_tool_calls} / {count_tool_calls}"
-    if finish_reason:
-        debug_info += f" Stop reason: {finish_reason}. Used {current_round} of {max_rounds} rounds"
+    debug_info += f" Used {current_round} of {max_rounds} rounds"
     
     formatted_response += debug_info
 
     # Log finish reason
-    tqdm.write(f"🛑 FINISHED. Used {current_round} of {max_rounds} rounds. {finish_reason}")
+    tqdm.write(f"🛑 FINISHED. Used {current_round} of {max_rounds} rounds.")
     
     return formatted_response.strip(), total_input_tokens, total_output_tokens
 
@@ -695,10 +682,15 @@ if __name__ == '__main__':
         }
         dbDataFrames['employees'] = pd.DataFrame(dummy_data)
         
+        # Get model instance
+        llm = get_model()
+        
         # Initialize conversation history for multi-turn
-        conversation: List[ChatCompletionRequestMessage] = [
-            {"role": "system", "content": "You are a helpful AI assistant with access to tools. You can analyze database tables and execute Python code when needed. Always be helpful and accurate in your responses."}
-        ]
+        llm_conversation = llm
+        
+        # Set up initial system message
+        with system():
+            llm_conversation += "You are a helpful AI assistant with access to tools. You can analyze database tables and execute Python code when needed. Always be helpful and accurate in your responses."
         
         while True:
             try:
@@ -717,10 +709,8 @@ if __name__ == '__main__':
                 print("-" * 10)
                 
                 # Add user message to conversation
-                conversation.append({"role": "user", "content": question})
-                
-                # Get model instance
-                llm = get_model()
+                with user():
+                    llm_conversation += question
                 
                 # Variables to track results
                 total_input_tokens = 0
@@ -730,44 +720,27 @@ if __name__ == '__main__':
                 
                 # Tool calling loop
                 while current_round < max_rounds:
-                    # Use create_chat_completion with the conversation and tools
-                    response_stream = llm.create_chat_completion(
-                        messages=conversation,
-                        tools=TOOLS_DEFINITION,
-                        tool_choice="auto",
-                        max_tokens=1000,
-                        temperature=0.6,
-                        top_p=0.95,
-                        top_k=20,
-                        repeat_penalty=1.1,
-                        stream=True,
-                        stop=["I AM DONE"]
-                    )
+                    input_tokens = llm_conversation._get_usage().input_tokens
+                    print(f"Usage: {llm_conversation._get_usage()}")
+
+                    # Generate assistant response
+                    with assistant():
+                        llm_conversation += gen(
+                            name=f"response_{current_round}", 
+                            max_tokens=1000, 
+                            temperature=0.6,
+                        )
                     
-                    # Process the streaming response
-                    response_text = ""
-                    token_count = 0
+                    # Get the generated response
+                    response_text = llm_conversation[f"response_{current_round}"]
                     
-                    print("🤖 Assistant: ", end="", flush=True)
+                    print(f"🤖 Assistant: {response_text}")
                     
-                    for chunk in response_stream:
-                        if chunk["choices"][0]["delta"].get("content"): # type: ignore
-                            content: str = chunk["choices"][0]["delta"]["content"] # type: ignore
-                            response_text += content
-                            print(content, end="", flush=True)
-                            token_count += 1
+                    # Get token usage
+                    output_tokens = llm_conversation._get_usage().output_tokens
                     
-                    print()  # New line after assistant response
-                    
-                    # Use actual tokenization for accurate counts
-                    input_tokens = len(llm.tokenize(question.encode())) if current_round == 0 else 0
-                    output_tokens = len(llm.tokenize(response_text.encode()))
-                    
-                    total_input_tokens += input_tokens
-                    total_output_tokens += output_tokens
-                    
-                    # Add assistant response to conversation
-                    conversation.append({"role": "assistant", "content": response_text})
+                    total_input_tokens += int(input_tokens)
+                    total_output_tokens += int(output_tokens)
                     
                     # Check for tool calls
                     tool_calls = extract_tool_calls(response_text)
@@ -790,14 +763,10 @@ if __name__ == '__main__':
                         
                         tool_results.append(format_tool_result(tool_name, result))
                     
-                    # Add tool results to conversation with proper format
+                    # Add tool results to conversation
                     tool_response = "\n".join(tool_results)
-                    tool_message: ChatCompletionRequestToolMessage = {
-                        "role": "tool", 
-                        "content": tool_response,
-                        "tool_call_id": f"call_{current_round}_{i}"  # Generate a unique tool call ID
-                    }
-                    conversation.append(tool_message)
+                    with user():
+                        llm_conversation += tool_response
                     
                     current_round += 1
                 
