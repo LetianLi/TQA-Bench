@@ -219,7 +219,7 @@ class TaskCore:
                         (
                             model,
                             scale,
-                            False,
+                            markdown,
                             dbIdx,
                             sampleIdx,
                             questionIdx,

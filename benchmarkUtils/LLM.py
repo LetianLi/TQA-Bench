@@ -1,13 +1,18 @@
 import os
 import tiktoken
 import requests
+import time
+import random
 from datetime import datetime
 from uuid import uuid4
-
+from dotenv import load_dotenv
 import sys
 sys.path.append('.')
 from benchmarkUtils.database import DB
 from benchmarkUtils.jsTool import JS
+from tqdm import tqdm
+
+load_dotenv()
 
 def gptCall(model,
             prompt,
@@ -19,7 +24,8 @@ def gptCall(model,
             }, # Proxy dictionary; defaults to a SOCKS5 proxy on port 1080
             OPENAI_API_KEY=None,
             otherInfo={},
-            delPrompt=True
+            delPrompt=True,
+            return_token_counts=False
             ):
     """
     model: GPT model, e.g. gpt-4, gpt-4o, gpt-4o-mini
@@ -50,14 +56,101 @@ def gptCall(model,
         }
         ],
     }
-    msg = None
+    message = None
+    input_tokens = 0
+    output_tokens = 0
+    cached_input_tokens = 0
+
+    def _parse_retry_after_seconds(resp, data):
+        # Prefer standard Retry-After header (seconds or HTTP-date)
+        ra = resp.headers.get('Retry-After') if resp is not None else None
+        if ra:
+            try:
+                return float(ra)
+            except Exception:
+                # If HTTP-date or unparsable, ignore and fall back
+                pass
+        # Fallback: parse from error.message e.g. "Please try again in 156ms" or "2s"
+        try:
+            msg = ((data or {}).get('error') or {}).get('message', '')
+            import re
+            m = re.search(r"in\s+(\d+)(ms|s)", msg)
+            if m:
+                val = float(m.group(1))
+                unit = m.group(2)
+                return val / 1000.0 if unit == 'ms' else val
+        except Exception:
+            pass
+        return None
+
+    def _post_with_retries(url, headers, json_body, proxies=None, max_retries=3, base_sleep=0.25, timeout=60):
+        last_err_text = None
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(url, headers=headers, json=json_body, proxies=proxies, timeout=timeout)
+                status = resp.status_code
+                # Successful HTTP
+                if 200 <= status < 300:
+                    data = resp.json()
+                    if isinstance(data, dict) and 'error' in data:
+                        # Treat embedded error as failure (rare on 2xx)
+                        last_err_text = str(data.get('error'))
+                        raise requests.RequestException(last_err_text)
+                    return data
+
+                # Retryable errors
+                if status in (429, 500, 502, 503, 504):
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = None
+                    sleep_s = _parse_retry_after_seconds(resp, data)
+                    if sleep_s is None:
+                        sleep_s = base_sleep * (2 ** attempt) * (1 + 0.2 * random.random())
+                    try:
+                        tqdm.write(f"⚠️ OpenAI HTTP {status}. Retrying in {sleep_s:.3f}s (attempt {attempt + 1}/3)", nolock=True)
+                    except Exception:
+                        pass
+                    time.sleep(sleep_s)
+                    last_err_text = resp.text[:500]
+                    continue
+
+                # Non-retryable
+                last_err_text = resp.text[:500]
+                resp.raise_for_status()
+            except (requests.Timeout, requests.ConnectionError) as e:
+                last_err_text = str(e)
+                sleep_s = base_sleep * (2 ** attempt) * (1 + 0.2 * random.random())
+                try:
+                    tqdm.write(f"⚠️ OpenAI network error. Retrying in {sleep_s:.3f}s (attempt {attempt + 1}/3): {last_err_text}", nolock=True)
+                except Exception:
+                    pass
+                time.sleep(sleep_s)
+                continue
+            except requests.RequestException as e:
+                # Non-retryable request error
+                last_err_text = str(e)
+                break
+        raise Exception(f"Failed to call OpenAI API or parse response. Last error: {last_err_text}")
+
+    resp_json = _post_with_retries(
+        'https://api.openai.com/v1/chat/completions', headers, bodies, proxies=proxies, max_retries=3
+    )
+
+    # Parse successful response
+    message = resp_json['choices'][0]['message']['content']
+    usage = resp_json.get('usage', {})
+    input_tokens = usage.get('prompt_tokens', 0)
+    output_tokens = usage.get('completion_tokens', 0)
+    prompt_tokens_details = usage.get('prompt_tokens_details') or {}
+    cached_input_tokens = prompt_tokens_details.get('cached_tokens', 0) or 0
+    # Log token stats via tqdm; don't change return signature
+    total_tokens = (input_tokens or 0) + (output_tokens or 0)
     try:
-        msg = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=bodies, proxies=proxies).json()
-        # msg = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=bodies).json()
-        msg = msg['choices'][0]['message']['content']
-    except Exception as e:
-        raise Exception(str(msg))
-    logInfo = {"model": model, "prompt": prompt, "message": msg}
+        tqdm.write(f"📊 Tokens | prompt: {input_tokens} | cached: {cached_input_tokens} | completion: {output_tokens} | total: {total_tokens}", nolock=True)
+    except Exception:
+        pass
+    logInfo = {"model": model, "prompt": prompt, "message": message}
     if delPrompt:
         del logInfo['prompt']
     logInfo.update(otherInfo)
@@ -66,7 +159,9 @@ def gptCall(model,
         fileName = logStart + "_" + fileName
     filePath = os.path.join(logPath, fileName)
     JS(filePath).newJS(logInfo)
-    return msg
+    if return_token_counts:
+        return message, input_tokens, output_tokens
+    return message
 
 def countDBToken(dbPath, markdown=False):
     """

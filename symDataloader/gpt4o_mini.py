@@ -16,7 +16,7 @@ def qaPrompt(dbStr, question, choices):
 def gpt4oCall(dbStr, question, choices):
     prompt = qaPrompt(dbStr, question, choices)
     message, input_tokens, output_tokens = gptCall(
-        'gpt-4o',
+        'gpt-4o-mini',
         prompt,
         'tmp',
         'symDataset/results/TableQA/log',
@@ -28,7 +28,7 @@ def gpt4oCall(dbStr, question, choices):
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/4o.sqlite' # result sqlite
+    resultPath = 'symDataset/results/TableQA/4o_mini.sqlite' # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
         # for scale in ['8k', '16k', '32k', '64k']:
@@ -40,7 +40,7 @@ if __name__ == '__main__':
             elif scale == '32k':
                 # timeSleep = 60
                 timeSleep = 0
-            tc.testAll('gpt-4o', # The model name saved in taskPath
+            tc.testAll('gpt-4o-mini', # The model name saved in taskPath
                     k, # dataset
                     scale, # 8k, 16k, 32k, 64k, 128k
                     False, # if use markdown
@@ -49,7 +49,7 @@ if __name__ == '__main__':
                     14, # questionLimit, 14 is ok
                     gpt4oCall,
                     timeSleep)
-            # tc.testAll('gpt-4o', # The model name saved in taskPath
+            # tc.testAll('gpt-4o-mini', # The model name saved in taskPath
             #         k, # dataset
             #         scale, # 8k, 16k, 32k, 64k, 128k
             #         True, # if use markdown
