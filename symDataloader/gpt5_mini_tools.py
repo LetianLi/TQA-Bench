@@ -1,5 +1,5 @@
 """
-GPT-4o-mini chat with tools for TableQA.
+GPT-5-mini chat with tools for TableQA.
 
 This mirrors the tool set and flow used in `llamacpp_qwen_tools.py` and
 `lmstudio_qwen_tools.py`, but uses OpenAI's Chat Completions tools API.
@@ -461,12 +461,12 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 # 3. Public API – plug into TaskCore
 # ---------------------------------------------------------------------------
-def gpt4oToolsCall(dbStr, question, choices):
+def gpt5miniToolsCall(dbStr, question, choices):
     """
-    Runs one inference via OpenAI GPT-4o-mini with tools and returns (message, input_tokens, output_tokens).
+    Runs one inference via OpenAI GPT-5-mini with tools and returns (message, input_tokens, output_tokens).
     """
     # Configuration
-    model = 'gpt-4o-mini'
+    model = 'gpt-5-mini'
     temperature = 0.6
     top_p = 0.95
     max_rounds = 10
@@ -598,19 +598,19 @@ def gpt4oToolsCall(dbStr, question, choices):
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB'  # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite'  # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/4o_mini_tools.sqlite'  # result sqlite
+    resultPath = 'symDataset/results/TableQA/5_mini_tools.sqlite'  # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
         for scale in ['8k']:
             timeSleep = 0
-            tc.testAll('gpt-4o-mini-tools',  # The model name saved in taskPath
+            tc.testAll('gpt-5-mini-tools',  # The model name saved in taskPath
                        k,  # dataset
                        scale,  # 8k, 16k, 32k, 64k, 128k
                        False,  # if use markdown
                        5,  # dbLimit, 10 is ok
                        1,  # sampleLimit, 1 is ok
                        14,  # questionLimit, 14 is ok
-                       gpt4oToolsCall,
+                       gpt5miniToolsCall,
                        timeSleep,
                        genDataFrames=True)
             
