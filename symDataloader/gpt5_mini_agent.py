@@ -780,8 +780,8 @@ def gpt5miniAgentCall(dbStr, question, choices):
     model = 'gpt-5-mini'
     temperature = 0.6
     top_p = 0.95
-    max_rounds_per_stage = 15
-    max_total_rounds = 50
+    max_rounds_per_stage = 5
+    max_total_rounds = 15
 
     proxies = {
         # Override via environment if needed; leave empty to use system env
