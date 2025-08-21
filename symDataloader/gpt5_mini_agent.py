@@ -1,8 +1,8 @@
 """
-GPT-5-mini chat with tools for TableQA.
+GPT-5-mini chat with agent flow for TableQA.
 
-This mirrors the tool set and flow used in `llamacpp_qwen_tools.py` and
-`lmstudio_qwen_tools.py`, but uses OpenAI's Chat Completions tools API.
+Instead of the LLM just choosing when and how to use tools, we provide the tools but also at each stage give different instructions.
+For example, first stage is determining the relevant tables and columns, second stage is combining and augmenting the data into a single table, third stage is answering the question.
 
 Use `uv sync` to install the dependencies.
 """
@@ -20,7 +20,7 @@ from tqdm import tqdm
 sys.path.append('.')
 from symbolic import dataDict
 from symDataloader.utils import TaskCore
-from benchmarkLoader import singleChoiceToolsPrompt
+from benchmarkLoader import build_stage1_prompt, build_stage2_prompt, build_stage3_prompt
 
 # ---------------------------------------------------------------------------
 # Emulation flag and helpers
@@ -163,9 +163,44 @@ def readTables(tableNames: list[str]):
         raise
 
 
+def submitTable(dataframe, table_name):
+    """
+    Submit a DataFrame as a new table in the database.
+
+    Args:
+        dataframe: pandas DataFrame to store
+        table_name: string name for the new table
+
+    Returns:
+        str: Success message with table info
+
+    Raises:
+        ValueError: If arguments are invalid
+    """
+    try:
+        # Validate arguments
+        if not isinstance(dataframe, pd.DataFrame):
+            raise ValueError("submitTable: First argument must be a pandas DataFrame")
+        if not isinstance(table_name, str):
+            raise ValueError("submitTable: Second argument must be a string")
+        if not table_name.strip():
+            raise ValueError("submitTable: Table name cannot be empty")
+        if len(table_name) > 100:
+            raise ValueError("submitTable: Table name too long (max 100 characters)")
+
+        # Store the dataframe
+        global dbDataFrames
+        dbDataFrames[table_name] = dataframe.copy()
+
+        return f"Table '{table_name}' created successfully with {len(dataframe)} rows and {len(dataframe.columns)} columns"
+
+    except Exception as e:
+        raise ValueError(f"submitTable error: {str(e)}")
+
+
 def executePython(code: str):
     """
-    Execute the given Python code in a sandboxed environment.
+    Execute the given Python code in a freshly created sandboxed environment.
     You may create variables, modify variables, modify the database through the tables variable, and read them back through the other tools.
     You must print the results to stdout in order to see them.
     A tables variable is already set up for you, so do not create a new variable by hardcoding values into the environment.
@@ -179,10 +214,25 @@ def executePython(code: str):
         - tables[table_name]: pandas DataFrame for the specified table
         - tables.keys(): List of all table names in the database
 
+    Available Functions:
+        - submitTable(dataframe, table_name): Store a DataFrame as a new table
+          - dataframe: pandas DataFrame to store
+          - table_name: string name for the new table
+          - Returns: Success message with table info
+          - Use this to persist your results for use in later stages
+        - getAllDataframes(): Get all tables as a dictionary
+        - getTableDataframe(table_name): Get a specific table as a DataFrame
+
     Available Libraries:
         - pandas: For data manipulation and analysis
         - numpy: For numerical computations
         - Python builtins: All standard Python built-in functions
+
+    Recommended Usage:
+        - `tables: dict[str, pd.DataFrame] = getAllDataframes()`
+        - `df: pd.DataFrame = getTableDataframe('table_name')`
+        - `submitTable(df, 'my_table')` available in Stage 2 to save your results for Stage 3
+        - Do all related work in a single executePython call when possible; environment does not persist between calls
 
     Note: You must use print() statements to output results. The output will be captured and returned.
 
@@ -229,7 +279,10 @@ def executePython(code: str):
             'pd': pd,
             'pandas': pd,
             'np': np,
-            'numpy': np
+            'numpy': np,
+            'getTableDataframe': lambda name: dbDataFrames.get(name),
+            'getAllDataframes': lambda: dbDataFrames,
+            'submitTable': submitTable
         }
 
         # Capture stdout and stderr
@@ -270,7 +323,17 @@ def executePython(code: str):
         if stderr_output:
             result_parts.append(f"STDERR:\n{stderr_output}")
         if error_occurred:
-            result_parts.append(f"ERROR:\n{error_message}")
+            error_note = f"ERROR:\n{error_message}"
+            
+            # Add helpful note about string escaping and variable usage
+            if "string" in error_message.lower() or "escape" in error_message.lower() or "quote" in error_message.lower():
+                error_note += "\n\nTIP: If this error occurred because of string escaping issues when trying to hardcode database values, don't do that! Instead, use the available functions:\n"
+                error_note += f"  - `getAllDataframes()`: Get all available tables as a dictionary\n"
+                error_note += f"  - `getTableDataframe('table_name')`: Get a specific table as a pandas DataFrame\n"
+                error_note += f"  - `pd`: pandas library for data manipulation\n"
+                error_note += f"  - `np`: numpy library for numerical operations"
+            
+            result_parts.append(error_note)
         if not result_parts:
             result_parts.append("Code executed successfully with no output.")
 
@@ -278,6 +341,97 @@ def executePython(code: str):
         return final_result
     except Exception as e:
         tqdm.write(f"⚠️ ERROR IN TOOL executePython: {e}", nolock=True)
+        raise
+
+
+def generateTable(newTableKey: str, code: str):
+    """
+    Generate a new table by executing the provided code and storing the result.
+    
+    Args:
+        newTableKey (str): The name/key for the new table
+        code (str): Python code that creates the table (should assign to 'result' variable)
+    """
+    try:
+        tqdm.write(f"\n```python\n{code}\n```\n", nolock=True)
+        
+        # Execute the code in the same sandboxed environment
+        import builtins
+        import io
+        import threading
+        from contextlib import redirect_stdout, redirect_stderr
+
+        # Create a sandboxed environment with only builtins
+        safe_builtins = {}
+        for name in dir(builtins):
+            if not name.startswith('_'):
+                safe_builtins[name] = getattr(builtins, name)
+
+        safe_builtins['__import__'] = builtins.__import__
+
+        # Create a safe globals dict with the tables object, builtins, pandas, and numpy
+        safe_globals = {
+            '__builtins__': safe_builtins,
+            'tables': dbDataFrames,
+            'pd': pd,
+            'pandas': pd,
+            'np': np,
+            'numpy': np
+        }
+
+        # Capture stdout and stderr
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+
+        error_occurred = False
+        error_message = ""
+
+        # Function to execute the code
+        def execute_code():
+            nonlocal error_occurred, error_message
+            try:
+                with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                    exec(code, safe_globals)
+                    # Check if 'result' variable was created
+                    if 'result' not in safe_globals:
+                        error_occurred = True
+                        error_message = "Code must create a 'result' variable containing the new table"
+                    else:
+                        # Store the result in the global dbDataFrames
+                        global dbDataFrames
+                        dbDataFrames[newTableKey] = safe_globals['result']
+            except Exception as e:
+                error_occurred = True
+                error_message = str(e)
+
+        # Execute code in a separate thread with timeout
+        execution_thread = threading.Thread(target=execute_code)
+        execution_thread.daemon = True
+        execution_thread.start()
+        execution_thread.join(timeout=120)
+
+        if execution_thread.is_alive():
+            error_occurred = True
+            error_message = "Execution timed out after 2 minutes"
+
+        # Get the captured output
+        stdout_output = stdout_capture.getvalue()
+        stderr_output = stderr_capture.getvalue()
+
+        # Prepare the result
+        if error_occurred:
+            result = f"Error creating table '{newTableKey}': {error_message}"
+        else:
+            new_table = dbDataFrames[newTableKey]
+            result = f"Successfully created table '{newTableKey}' with {len(new_table)} rows and columns: {', '.join(new_table.columns.tolist())}"
+            
+            # Add sample data to the result
+            if len(new_table) > 0:
+                result += f"\n\nSample data (first 3 rows):\n{new_table.head(3).to_string(index=False)}"
+
+        return result
+    except Exception as e:
+        tqdm.write(f"⚠️ ERROR IN TOOL generateTable: {e}", nolock=True)
         raise
 
 
@@ -353,10 +507,129 @@ def format_tool_result(tool_name: str, result: str) -> str:
     return f'<tool_result name="{tool_name}">\n{result}\n</tool_result>'
 
 
-def qaPrompt(dbStr, question, choices):
-    totalQuestion = f'{question}\n\n{choices}'
-    prompt = singleChoiceToolsPrompt.format(question=totalQuestion)
-    return prompt
+# ---------------------------------------------------------------------------
+# 3. Stage Configuration
+# ---------------------------------------------------------------------------
+
+STAGES = {
+    "exploration": {
+        "tools": ["peekTables", "readTables", "executePython"],
+        "completion_marker": "TABLES RELEVANT:"
+    },
+    "data_prep": {
+        "tools": ["peekTables", "readTables", "executePython"],
+        "completion_marker": "PREPARED TABLE NAME:"
+    },
+    "analysis": {
+        "tools": ["peekTables", "readTables", "executePython"],
+        "completion_marker": "Answer:"
+    }
+}
+
+
+def parse_stage_completion(content: str, stage: str) -> Dict[str, Any]:
+    """Parse the completion markers for a given stage and extract relevant information."""
+    result = {}
+    
+    if stage == "exploration":
+        # Parse TABLES RELEVANT and TABLE X RELEVANT COLUMNS
+        lines = content.split('\n')
+        tables_relevant = []
+        table_columns = {}
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("TABLES RELEVANT:"):
+                tables_relevant = [t.strip() for t in line.replace("TABLES RELEVANT:", "").split(',')]
+            elif line.startswith("TABLE ") and " RELEVANT COLUMNS:" in line:
+                parts = line.split(" RELEVANT COLUMNS:")
+                table_name = parts[0].replace("TABLE ", "").strip()
+                columns = [c.strip() for c in parts[1].split(',')]
+                table_columns[table_name] = columns
+        
+        result = {
+            "tables_relevant": tables_relevant,
+            "table_columns": table_columns
+        }
+        
+    elif stage == "data_prep":
+        # Parse PREPARED TABLE NAME
+        lines = content.split('\n')
+        prepared_table = None
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("PREPARED TABLE NAME:"):
+                prepared_table = line.replace("PREPARED TABLE NAME:", "").strip()
+                break
+        
+        result = {
+            "prepared_table": prepared_table
+        }
+    
+    return result
+
+
+def get_stage1_context() -> str:
+    """Get context for Stage 1: just table names"""
+    table_names = list(dbDataFrames.keys())
+    return f"Available tables: {', '.join(table_names)}"
+
+
+def get_stage2_context(exploration_info: Dict[str, Any]) -> str:
+    """Get context for Stage 2: peeks of relevant tables"""
+    tables = exploration_info.get("tables_relevant", [])
+    table_peeks = {}
+    
+    for table in tables:
+        if table in dbDataFrames:
+            df = dbDataFrames[table]
+            table_peeks[table] = {
+                "rows": len(df),
+                "columns": df.columns.tolist(),
+                "sample": df.head(3).to_dict('records') if len(df) > 0 else []
+            }
+    
+    context = f"Relevant tables from exploration:\n"
+    for table, peek_info in table_peeks.items():
+        context += f"\n{table}:\n"
+        context += f"  Rows: {peek_info['rows']}\n"
+        context += f"  Columns: {', '.join(peek_info['columns'])}\n"
+        if peek_info['sample']:
+            context += f"  Sample data:\n"
+            for i, row in enumerate(peek_info['sample'][:2]):  # Just 2 rows
+                context += f"    Row {i+1}: {row}\n"
+    
+    return context
+
+
+def get_stage3_context(data_prep_info: Dict[str, Any]) -> str:
+    """Get context for Stage 3: only the prepared table"""
+    prepared_table = data_prep_info.get("prepared_table")
+    
+    if prepared_table and prepared_table in dbDataFrames:
+        df = dbDataFrames[prepared_table]
+        context = f"Prepared table: {prepared_table}\n"
+        context += f"Structure: {len(df)} rows, columns: {', '.join(df.columns.tolist())}\n\n"
+        context += f"Preview:\n{df.head(5).to_string(index=False)}"
+    else:
+        context = f"Prepared table: {prepared_table} (table not found)"
+    
+    return context
+
+
+def get_stage_tools(stage: str) -> List[Dict[str, Any]]:
+    """Get the tools definition for a specific stage."""
+    stage_config = STAGES[stage]
+    stage_tools = stage_config["tools"]
+    
+    # Filter the full tools definition to only include stage-specific tools
+    filtered_tools = []
+    for tool in TOOLS_DEFINITION:
+        if tool["function"]["name"] in stage_tools:
+            filtered_tools.append(tool)
+    
+    return filtered_tools
 
 
 def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any]:
@@ -374,6 +647,7 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
         print("\nEnter assistant response (single line). Options:")
         print("  - Plain text to return as assistant content")
         print("  - !call <toolName> <argsJson> to request a tool call (e.g., !call getTableNames {})")
+        print("  - !ai to let GPT generate a response once")
         print("  - JSON object for a message, e.g., {\"content\": \"...\", \"tool_calls\": [...]} ")
         print("  - Full JSON response with choices[] if you prefer")
         user_resp = input("> ")
@@ -394,7 +668,44 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             }
 
-        # 1) Shorthand: !call <toolName> <argsJson>. Example: `!call executePython {"code":"print(list(tables.keys()))"}`
+        # 1) AI generation mode: !ai to let GPT generate response
+        if user_resp.strip() == '!ai':
+            try:
+                # Use OpenAI API to generate a response
+                api_key = os.getenv('OPENAI_API_KEY')
+                if not api_key:
+                    print("⚠️ OPENAI_API_KEY not set, cannot generate AI response")
+                    return _wrap_message_as_response({"content": "Error: API key not available"})
+                
+                # Make the actual API call
+                session = requests.Session()
+                retries = Retry(
+                    total=3,
+                    backoff_factor=1,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["POST"],
+                    respect_retry_after_header=True,
+                )
+                session.mount('https://', HTTPAdapter(max_retries=retries))
+
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {api_key}'
+                }
+                
+                print("🤖 Generating AI response...")
+                resp = session.post('https://api.openai.com/v1/chat/completions', headers=headers, json=body, proxies=proxies)
+                resp.raise_for_status()
+                ai_resp = resp.json()
+                
+                print("✅ AI response generated successfully")
+                return ai_resp
+                
+            except Exception as e:
+                print(f"⚠️ Error generating AI response: {e}")
+                return _wrap_message_as_response({"content": f"Error generating AI response: {e}"})
+
+        # 2) Shorthand: !call <toolName> <argsJson>. Example: `!call executePython {"code":"print(list(tables.keys()))"}`
         if user_resp.strip().startswith('!call'):
             try:
                 parts = user_resp.strip().split(' ', 2)
@@ -418,7 +729,7 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
             }
             return _wrap_message_as_response(message)
 
-        # 2) Raw JSON input handling
+        # 3) Raw JSON input handling
         if user_resp.strip().startswith('{'):
             try:
                 parsed = json.loads(user_resp)
@@ -432,7 +743,7 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
                 # Fallback to plain content
                 pass
 
-        # 3) Plain text content
+        # 4) Plain text content
         return _wrap_message_as_response({"content": user_resp})
 
     api_key = os.getenv('OPENAI_API_KEY')
@@ -459,17 +770,18 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
 
 
 # ---------------------------------------------------------------------------
-# 3. Public API – plug into TaskCore
+# 4. Public API – plug into TaskCore
 # ---------------------------------------------------------------------------
-def gpt5miniToolsCall(dbStr, question, choices):
+def gpt5miniAgentCall(dbStr, question, choices):
     """
-    Runs one inference via OpenAI GPT-5-mini with tools and returns (message, input_tokens, output_tokens).
+    Runs one inference via OpenAI GPT-5-mini with staged agent flow and returns (message, input_tokens, output_tokens).
     """
     # Configuration
     model = 'gpt-5-mini'
-    temperature = 1.0 # only supported value for gpt 5 mini
-    top_p = None # not supported at all for gpt 5 mini
-    max_rounds = 10
+    temperature = 0.6
+    top_p = 0.95
+    max_rounds_per_stage = 15
+    max_total_rounds = 50
 
     proxies = {
         # Override via environment if needed; leave empty to use system env
@@ -478,33 +790,40 @@ def gpt5miniToolsCall(dbStr, question, choices):
     }
 
     # Prepare prompt and DB
-    prompt = qaPrompt(dbStr, question, choices)
     global dbDataFrames
     dbDataFrames = dbStr
+    prompt = build_stage1_prompt(question, get_stage1_context())
 
+    # Initialize stage tracking
+    current_stage = "exploration"
+    stage_rounds = 0
+    total_rounds = 0
+    previous_stages_info = {}
+    
     # Conversation
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": "You have access to tools to analyze database tables. Use them when needed to answer questions accurately."},
         {"role": "user", "content": prompt},
     ]
 
-    formatted_response = ""
+    formatted_response = f"\n{'='*10}\n🚀 STARTING STAGE 1: Database Exploration\n{'='*10}\n"
     total_input_tokens = 0
     total_output_tokens = 0
     count_tool_calls = 0
     failed_tool_calls = 0
 
-    current_round = 0
     finish_reason = None
-
-    while current_round < max_rounds:
+    
+    while current_stage in STAGES and total_rounds < max_total_rounds:
+        # Get stage-specific tools
+        stage_tools = get_stage_tools(current_stage)
+        
         body = {
             "model": model,
             "messages": messages,
-            "tools": TOOLS_DEFINITION,
+            "tools": stage_tools,
             "tool_choice": "auto",
-            # "temperature": temperature,
-            # "top_p": top_p,
+            "temperature": temperature,
+            "top_p": top_p,
         }
 
         try:
@@ -532,8 +851,89 @@ def gpt5miniToolsCall(dbStr, question, choices):
             "tool_calls": tool_calls if tool_calls else None
         })
 
+        # Check if current stage is complete
+        stage_config = STAGES[current_stage]
+        completion_marker = stage_config["completion_marker"]
+        
+        if completion_marker in content:
+            # Stage is complete, parse information and move to next stage
+            stage_info = parse_stage_completion(content, current_stage)
+            previous_stages_info[current_stage] = stage_info
+
+            # Determine next stage
+            if current_stage == "exploration":
+                formatted_response += f"\n\n{'='*10}\n🏁 STAGE 1 COMPLETE - Moving to STAGE 2\n{'='*10}\n"
+                current_stage = "data_prep"
+            elif current_stage == "data_prep":
+                formatted_response += f"\n\n{'='*10}\n🏁 STAGE 2 COMPLETE - Moving to STAGE 3\n{'='*10}\n"
+                current_stage = "analysis"
+            elif current_stage == "analysis":
+                formatted_response += f"\n\n{'='*10}\n🏁 STAGE 3 COMPLETE - All stages finished\n{'='*10}\n"
+                break  # All stages complete
+            
+            # Build context for next stage
+            stage_context = ""
+            if current_stage == "data_prep":
+                # Stage 2 gets the NOTE TO NEXT STAGE from Stage 1 + relevant table data
+                exploration_info = previous_stages_info["exploration"]
+                note_to_next = ""
+                
+                # Extract the NOTE TO NEXT STAGE from Stage 1's output
+                if "exploration" in previous_stages_info:
+                    # Parse the content to find NOTE TO NEXT STAGE
+                    content_lines = content.split('\n')
+                    for line in content_lines:
+                        if line.strip().startswith("NOTE TO NEXT STAGE:"):
+                            note_to_next = line.strip()
+                            break
+                
+                if not note_to_next:
+                    note_to_next = "NOTE TO NEXT STAGE: No specific note provided from exploration stage"
+                
+                stage_context = build_stage2_prompt(question, get_stage2_context(exploration_info), note_to_next)
+                
+            elif current_stage == "analysis":
+                # Stage 3 gets the NOTE TO NEXT STAGE from Stage 2 + prepared table data
+                data_prep_info = previous_stages_info["data_prep"]
+                note_to_next = ""
+                
+                # Extract the NOTE TO NEXT STAGE from Stage 2's output
+                if "data_prep" in previous_stages_info:
+                    # Parse the content to find NOTE TO NEXT STAGE
+                    content_lines = content.split('\n')
+                    for line in content_lines:
+                        if line.strip().startswith("NOTE TO NEXT STAGE:"):
+                            note_to_next = line.strip()
+                            break
+                
+                if not note_to_next:
+                    note_to_next = "NOTE TO NEXT STAGE: No specific note provided from data preparation stage"
+                
+                stage_context = build_stage3_prompt(question, choices, get_stage3_context(data_prep_info), note_to_next)
+            
+            # Start fresh with new user message for the next stage
+            messages = [
+                {"role": "user", "content": stage_context},
+            ]
+            
+            # Reset stage rounds
+            stage_rounds = 0
+            continue
+
         if not tool_calls:
-            break
+            # No tool calls and no completion marker - continue with current stage
+            stage_rounds += 1
+            total_rounds += 1
+            if stage_rounds >= max_rounds_per_stage:
+                # Force stage transition if too many rounds
+                if current_stage == "exploration":
+                    current_stage = "data_prep"
+                elif current_stage == "data_prep":
+                    current_stage = "analysis"
+                elif current_stage == "analysis":
+                    break
+                stage_rounds = 0
+                continue
 
         # Execute tools
         tool_results_blocks: List[str] = []
@@ -584,12 +984,14 @@ def gpt5miniToolsCall(dbStr, question, choices):
         # Optional: include a summarized tool_result block as a message (not required by API)
         formatted_response += f"\n"
 
-        current_round += 1
+        stage_rounds += 1
+        total_rounds += 1
 
     # Add debug footer
     debug_info = f"\n\nDebug:  Failed tool calls: {failed_tool_calls} / {count_tool_calls}"
     if finish_reason:
-        debug_info += f"  Stop reason: {finish_reason}. Used {current_round} of {max_rounds} rounds"
+        debug_info += f"  Stop reason: {finish_reason}. Used {total_rounds} of {max_total_rounds} rounds"
+    debug_info += f"  Completed stages: {list(previous_stages_info.keys())}"
     formatted_response += debug_info
 
     return formatted_response.strip(), total_input_tokens, total_output_tokens
@@ -598,19 +1000,19 @@ def gpt5miniToolsCall(dbStr, question, choices):
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB'  # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite'  # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/5_mini_tools.sqlite'  # result sqlite
+    resultPath = 'symDataset/results/TableQA/5_mini_agent.sqlite'  # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
         for scale in ['8k']:
             timeSleep = 0
-            tc.testAll('gpt-5-mini-tools',  # The model name saved in taskPath
+            tc.testAll('gpt-5-mini-agent',  # The model name saved in taskPath
                        k,  # dataset
                        scale,  # 8k, 16k, 32k, 64k, 128k
                        False,  # if use markdown
                        5,  # dbLimit, 10 is ok
                        1,  # sampleLimit, 1 is ok
                        14,  # questionLimit, 14 is ok
-                       gpt5miniToolsCall,
+                       gpt5miniAgentCall,
                        timeSleep,
                        genDataFrames=True)
             

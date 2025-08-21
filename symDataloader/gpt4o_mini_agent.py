@@ -163,9 +163,44 @@ def readTables(tableNames: list[str]):
         raise
 
 
+def submitTable(dataframe, table_name):
+    """
+    Submit a DataFrame as a new table in the database.
+
+    Args:
+        dataframe: pandas DataFrame to store
+        table_name: string name for the new table
+
+    Returns:
+        str: Success message with table info
+
+    Raises:
+        ValueError: If arguments are invalid
+    """
+    try:
+        # Validate arguments
+        if not isinstance(dataframe, pd.DataFrame):
+            raise ValueError("submitTable: First argument must be a pandas DataFrame")
+        if not isinstance(table_name, str):
+            raise ValueError("submitTable: Second argument must be a string")
+        if not table_name.strip():
+            raise ValueError("submitTable: Table name cannot be empty")
+        if len(table_name) > 100:
+            raise ValueError("submitTable: Table name too long (max 100 characters)")
+
+        # Store the dataframe
+        global dbDataFrames
+        dbDataFrames[table_name] = dataframe.copy()
+
+        return f"Table '{table_name}' created successfully with {len(dataframe)} rows and {len(dataframe.columns)} columns"
+
+    except Exception as e:
+        raise ValueError(f"submitTable error: {str(e)}")
+
+
 def executePython(code: str):
     """
-    Execute the given Python code in a sandboxed environment.
+    Execute the given Python code in a freshly created sandboxed environment.
     You may create variables, modify variables, modify the database through the tables variable, and read them back through the other tools.
     You must print the results to stdout in order to see them.
     A tables variable is already set up for you, so do not create a new variable by hardcoding values into the environment.
@@ -179,6 +214,15 @@ def executePython(code: str):
         - tables[table_name]: pandas DataFrame for the specified table
         - tables.keys(): List of all table names in the database
 
+    Available Functions:
+        - submitTable(dataframe, table_name): Store a DataFrame as a new table
+          - dataframe: pandas DataFrame to store
+          - table_name: string name for the new table
+          - Returns: Success message with table info
+          - Use this to persist your results for use in later stages
+        - getAllDataframes(): Get all tables as a dictionary
+        - getTableDataframe(table_name): Get a specific table as a DataFrame
+
     Available Libraries:
         - pandas: For data manipulation and analysis
         - numpy: For numerical computations
@@ -187,6 +231,8 @@ def executePython(code: str):
     Recommended Usage:
         - `tables: dict[str, pd.DataFrame] = getAllDataframes()`
         - `df: pd.DataFrame = getTableDataframe('table_name')`
+        - `submitTable(df, 'my_table')` available in Stage 2 to save your results for Stage 3
+        - Do all related work in a single executePython call when possible; environment does not persist between calls
 
     Note: You must use print() statements to output results. The output will be captured and returned.
 
@@ -235,7 +281,8 @@ def executePython(code: str):
             'np': np,
             'numpy': np,
             'getTableDataframe': lambda name: dbDataFrames.get(name),
-            'getAllDataframes': lambda: dbDataFrames
+            'getAllDataframes': lambda: dbDataFrames,
+            'submitTable': submitTable
         }
 
         # Capture stdout and stderr
@@ -389,7 +436,7 @@ def generateTable(newTableKey: str, code: str):
 
 
 # Tool registry - array of functions
-TOOLS = [getTableNames, peekTables, readTables, executePython, generateTable]
+TOOLS = [getTableNames, peekTables, readTables, executePython]
 
 
 def _convert_type_to_json_schema(param_type: Any) -> dict:
@@ -470,7 +517,7 @@ STAGES = {
         "completion_marker": "TABLES RELEVANT:"
     },
     "data_prep": {
-        "tools": ["peekTables", "readTables", "executePython", "generateTable"],
+        "tools": ["peekTables", "readTables", "executePython"],
         "completion_marker": "PREPARED TABLE NAME:"
     },
     "analysis": {
@@ -725,7 +772,7 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 # 4. Public API – plug into TaskCore
 # ---------------------------------------------------------------------------
-def gpt4oToolsCall(dbStr, question, choices):
+def gpt4ominiAgentCall(dbStr, question, choices):
     """
     Runs one inference via OpenAI GPT-4o-mini with staged agent flow and returns (message, input_tokens, output_tokens).
     """
@@ -743,9 +790,9 @@ def gpt4oToolsCall(dbStr, question, choices):
     }
 
     # Prepare prompt and DB
-    prompt = build_stage1_prompt(question, get_stage1_context())
     global dbDataFrames
     dbDataFrames = dbStr
+    prompt = build_stage1_prompt(question, get_stage1_context())
 
     # Initialize stage tracking
     current_stage = "exploration"
@@ -758,7 +805,7 @@ def gpt4oToolsCall(dbStr, question, choices):
         {"role": "user", "content": prompt},
     ]
 
-    formatted_response = ""
+    formatted_response = f"\n{'='*10}\n🚀 STARTING STAGE 1: Database Exploration\n{'='*10}\n"
     total_input_tokens = 0
     total_output_tokens = 0
     count_tool_calls = 0
@@ -808,17 +855,20 @@ def gpt4oToolsCall(dbStr, question, choices):
         stage_config = STAGES[current_stage]
         completion_marker = stage_config["completion_marker"]
         
-        if completion_marker in content and not tool_calls:
+        if completion_marker in content:
             # Stage is complete, parse information and move to next stage
             stage_info = parse_stage_completion(content, current_stage)
             previous_stages_info[current_stage] = stage_info
-            
+
             # Determine next stage
             if current_stage == "exploration":
+                formatted_response += f"\n\n{'='*10}\n🏁 STAGE 1 COMPLETE - Moving to STAGE 2\n{'='*10}\n"
                 current_stage = "data_prep"
             elif current_stage == "data_prep":
+                formatted_response += f"\n\n{'='*10}\n🏁 STAGE 2 COMPLETE - Moving to STAGE 3\n{'='*10}\n"
                 current_stage = "analysis"
             elif current_stage == "analysis":
+                formatted_response += f"\n\n{'='*10}\n🏁 STAGE 3 COMPLETE - All stages finished\n{'='*10}\n"
                 break  # All stages complete
             
             # Build context for next stage
@@ -863,7 +913,7 @@ def gpt4oToolsCall(dbStr, question, choices):
             
             # Start fresh with new user message for the next stage
             messages = [
-                {"role": "user", "content": f"{STAGES[current_stage]['prompt']}\n\n{stage_context}"},
+                {"role": "user", "content": stage_context},
             ]
             
             # Reset stage rounds
@@ -962,7 +1012,7 @@ if __name__ == '__main__':
                        5,  # dbLimit, 10 is ok
                        1,  # sampleLimit, 1 is ok
                        14,  # questionLimit, 14 is ok
-                       gpt4oToolsCall,
+                       gpt4ominiAgentCall,
                        timeSleep,
                        genDataFrames=True)
             
