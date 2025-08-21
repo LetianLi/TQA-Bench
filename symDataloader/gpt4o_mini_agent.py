@@ -925,15 +925,13 @@ def gpt4ominiAgentCall(dbStr, question, choices):
             stage_rounds += 1
             total_rounds += 1
             if stage_rounds >= max_rounds_per_stage:
-                # Force stage transition if too many rounds
-                if current_stage == "exploration":
-                    current_stage = "data_prep"
-                elif current_stage == "data_prep":
-                    current_stage = "analysis"
-                elif current_stage == "analysis":
-                    break
-                stage_rounds = 0
-                continue
+                # Max rounds reached - break with error
+                formatted_response += f"\n\n{'='*10}\n❌ ERROR: Max rounds per stage reached\n{'='*10}\n"
+                formatted_response += f"Stage: {current_stage}\n"
+                formatted_response += f"Rounds used: {stage_rounds}\n"
+                formatted_response += f"Agent failed to complete stage within {max_rounds_per_stage} rounds\n"
+                formatted_response += f"{'='*10}\n"
+                break
 
         # Execute tools
         tool_results_blocks: List[str] = []
