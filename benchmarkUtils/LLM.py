@@ -83,7 +83,7 @@ def gptCall(model,
             pass
         return None
 
-    def _post_with_retries(url, headers, json_body, proxies=None, max_retries=3, base_sleep=0.25, timeout=60):
+    def _post_with_retries(url, headers, json_body, proxies=None, max_retries=5, base_sleep=0.25, timeout=300):
         last_err_text = None
         for attempt in range(max_retries):
             try:

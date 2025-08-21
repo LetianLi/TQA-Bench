@@ -13,9 +13,6 @@ with open('benchmarkLoader/prompts/singleChoicePrompt.txt', 'r') as f:
 with open('benchmarkLoader/prompts/singleChoiceToolsPrompt.txt', 'r') as f:
     singleChoiceToolsPrompt = f.read()
 
-with open('benchmarkLoader/prompts/singleChoiceAgentPrompt.txt', 'r') as f:
-    singleChoiceAgentPrompt = f.read()
-
 with open('benchmarkLoader/prompts/multiChoicePrompt.txt', 'r') as f:
     multiPrompt = f.read()
 
@@ -90,7 +87,6 @@ def build_stage2_prompt(question: str, exploration_data: str, note_to_next: str)
 
 ## Available Tools
 - `executePython` - Run custom Python code for data manipulation and verification
-- `generateTable` - Create and store a new combined table
 
 ## Task
 Create a combined table that contains all the information needed to answer the question.
@@ -106,17 +102,19 @@ Create a combined table that contains all the information needed to answer the q
 
 ## What You Need to Do
 1. **Analyze the exploration results** to understand what data you have available
-2. **Write Python code** that creates a combined table from the relevant tables
-3. **Use the `generateTable` tool** to create and store your new table
-   - This tool is REQUIRED - it creates a table that Stage 3 will use
-   - Without using `generateTable`, Stage 3 won't have access to your prepared data
+2. **Write Python code** that creates a combined table from the relevant tables (cleaned, filtered, and augmented)
+   - **IMPORTANT**: Try to do all your data manipulation in a single executePython call
+   - Each executePython call is independent - variables don't persist between calls
+3. **Use `submitTable(dataframe, table_name)`** to store your new table
+   - This is REQUIRED - it creates a table that Stage 3 will use to do final analysis on
+   - Without using `submitTable`, Stage 3 won't have access to your prepared data
 4. **Verify your generated table** using `executePython` to check its structure and content
 5. **Output the table name** in the exact format specified below
 
 ## How the Tools Work Together
 - **`executePython`**: Use this to write code that manipulates data and creates your combined table
-- **`generateTable`**: This tool takes your Python code and creates a new table in the database
-- **Important**: Stage 3 will only be able to access tables created with `generateTable`
+- **`submitTable(dataframe, table_name)`**: This function provided in the executePython tool stores your DataFrame as a new table in the database
+- **Important**: Stage 3 will only be able to access tables created with `submitTable`
 - **Verification**: Use `executePython` after creating the table to verify it looks correct
 
 ## Output Format
@@ -129,9 +127,9 @@ NOTE TO NEXT STAGE: Brief description of what the prepared table contains
 ```
 
 ## Important Notes
-- **PREPARED TABLE NAME**: The exact name of the table you created with `generateTable`
+- **PREPARED TABLE NAME**: The exact name of the table you created with `submitTable`
 - **NOTE TO NEXT STAGE**: Explain what your prepared table contains and how it helps answer the question
-- **Table Creation**: You MUST use `generateTable` for Stage 3 to access your data
+- **Table Creation**: You MUST use `submitTable` for Stage 3 to access your data
 - **Verification**: Always verify your table with `executePython` before marking completion"""
 
 
@@ -206,3 +204,6 @@ class BenchmarkDataset(Dataset):
     def loadDB(self, dbn):
         dbp = os.path.join(self.dbRoot, dbn, f'{dbn}.sqlite')
         return DB(dbp)
+
+
+
