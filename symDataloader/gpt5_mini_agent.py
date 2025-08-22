@@ -778,8 +778,8 @@ def gpt5miniAgentCall(dbStr, question, choices):
     """
     # Configuration
     model = 'gpt-5-mini'
-    temperature = 0.6
-    top_p = 0.95
+    temperature = 1.0 # only supported value for gpt 5 mini
+    top_p = None # not supported at all for gpt 5 mini
     max_rounds_per_stage = 5
     max_total_rounds = 15
 
@@ -822,8 +822,8 @@ def gpt5miniAgentCall(dbStr, question, choices):
             "messages": messages,
             "tools": stage_tools,
             "tool_choice": "auto",
-            "temperature": temperature,
-            "top_p": top_p,
+            # "temperature": temperature,
+            # "top_p": top_p,
         }
 
         try:
