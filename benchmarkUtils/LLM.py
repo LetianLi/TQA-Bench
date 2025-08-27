@@ -134,7 +134,7 @@ def gptCall(model,
         raise Exception(f"Failed to call OpenAI API or parse response. Last error: {last_err_text}")
 
     resp_json = _post_with_retries(
-        'https://api.openai.com/v1/chat/completions', headers, bodies, proxies=proxies, max_retries=3
+        'https://api.openai.com/v1/chat/completions', headers, bodies, proxies=proxies, max_retries=3, timeout=None
     )
 
     # Parse successful response
