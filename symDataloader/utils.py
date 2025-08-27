@@ -12,12 +12,50 @@ from benchmarkUtils.database import DB
 
 
 def extractAnswer(text: str) -> str:
-    patt = r"answer:\s*([A-F]+|N/A)"
+    patt = r"answer: *([A-F]+|N/A)"
     grps = re.findall(patt, text, re.IGNORECASE)
     if grps:
         return grps[-1].upper()
     return ""
 
+def testValid(rightIdx, choice_a, choice_b, choice_c, choice_d):
+    """
+    Private function to test if a question is valid.
+    
+    Args:
+        rightIdx: Index of the correct answer (0-3)
+        choice_a, choice_b, choice_c, choice_d: The answer choices
+        
+    Returns:
+        tuple: (is_valid, reason) where reason is None if valid, or a string describing why invalid
+    """
+    # Check if rightIdx is valid
+    if rightIdx is None or not (0 <= rightIdx <= 3):
+        return False, "invalid rightIdx"
+    
+    # Get all choices and check if they're all "nan"
+    choices = [choice_a, choice_b, choice_c, choice_d]
+    
+    # Check if all choices are "nan" (case-insensitive)
+    all_nan = all(
+        choice is None or 
+        str(choice).lower() in ["nan", "none", ""] or 
+        (isinstance(choice, str) and choice.strip() == "")
+        for choice in choices
+    )
+    
+    if all_nan:
+        return False, "all nan"
+    
+    # Check if the correct choice exists and is valid
+    if rightIdx < len(choices):
+        correct_choice = choices[rightIdx]
+        if (correct_choice is None or 
+            str(correct_choice).lower() in ["nan", "none", "unknown"] or
+            (isinstance(correct_choice, str) and correct_choice.strip() == "")):
+            return False, "none answer"
+    
+    return True, None
 
 class TaskCore:
     choicesMap = "A B C D E F".split()
@@ -37,6 +75,7 @@ class TaskCore:
         input_tokens integer,
         output_tokens integer,
         qtype text,
+        validQuestion integer,
         primary key (model, scale, markdown, dbidx, sampleidx, questionidx)
     );
     """
@@ -49,8 +88,8 @@ class TaskCore:
 
     inserttemplate = """
     insert or ignore into {table_name}
-    (model, scale, markdown, dbidx, sampleidx, questionidx, gt, pred, correct, error, message, input_tokens, output_tokens, qtype)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    (model, scale, markdown, dbidx, sampleidx, questionidx, gt, pred, correct, error, message, input_tokens, output_tokens, qtype, validQuestion)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """
 
     def __init__(self, dbRoot, taskPath, resultPath) -> None:
@@ -69,6 +108,17 @@ class TaskCore:
 
         for tn in self.tableNames:
             self.resultCur.execute(TaskCore.createresulttemplate.format(table_name=tn))
+            
+            # Check if validQuestion column exists, add it if it doesn't
+            try:
+                self.resultCur.execute(f"PRAGMA table_info({tn})")
+                columns = [col[1] for col in self.resultCur.fetchall()]
+                if 'validQuestion' not in columns:
+                    self.resultCur.execute(f"ALTER TABLE {tn} ADD COLUMN validQuestion INTEGER DEFAULT 0")
+                    print(f"Added validQuestion column to existing table {tn}")
+            except Exception as e:
+                print(f"Warning: Could not add validQuestion column to table {tn}: {e}")
+                
         self.resultConn.commit()
 
     def loadTaskItem(self, dbn, scale, dbIdx, sampleIdx, questionIdx):
@@ -162,10 +212,10 @@ class TaskCore:
         for dbIdx in tqdm(range(dbLimit), desc=f"DBs ({dbn})", position=0, leave=True):
             for sampleIdx in tqdm(range(sampleLimit), desc=f"  Sample", position=1, leave=False):
                 for questionIdx in tqdm(range(questionLimit), desc=f"    Questions", position=2, leave=False):
-                    if self.resultCheck(
-                        dbn, model, scale, markdown, dbIdx, sampleIdx, questionIdx
-                    ):
-                        continue
+                    # if self.resultCheck(
+                    #     dbn, model, scale, markdown, dbIdx, sampleIdx, questionIdx
+                    # ):
+                    #     continue
                     item = self.loadTaskItem(dbn, scale, dbIdx, sampleIdx, questionIdx)
                     if item is None:
                         continue
@@ -187,33 +237,47 @@ class TaskCore:
                     question = item[-6]
                     qtype = item[-7]
 
+                    # Check if the question is valid
+                    rightIdx = item[-5]  # rightIdx is the 5th element from the end
+                    choice_a, choice_b, choice_c, choice_d = item[-4:]  # Last 4 elements are the choices
+                    is_valid, reason = testValid(rightIdx, choice_a, choice_b, choice_c, choice_d)
+                    
                     pred = ""
                     error = ""
                     res = ""
                     resStr = ""
                     input_tokens = 0
                     output_tokens = 0
-                    try:
-                        res = func(dbStr, question, choicesStr)
-                        if isinstance(res, tuple) and len(res) == 3: # Check if we return token info
-                            resStr, input_tokens, output_tokens = res
-                        else:
-                            resStr = str(res)  # Ensure res is a string
-                            # If no token info provided, set to 0
-                            input_tokens = 0
-                            output_tokens = 0
-                        
-                        pred = extractAnswer(resStr)
-                        
-                        # Write debug output to lastOutput.txt
-                        debug_file_path = os.path.join(os.path.dirname(self.resultPath), "lastOutput.txt")
-                        with open(debug_file_path, 'w', encoding='utf-8') as f:
-                            f.write(resStr + "\n\n" + "*"*20 + "\n\nExtracted answer: " + pred)
-                        
-                        time.sleep(timeSleep)
-                    except Exception as e:
-                        print(e)
-                        error = str(e)
+                    
+                    # Only process the question if it's valid
+                    if is_valid:
+                        try:
+                            res = func(dbStr, question, choicesStr)
+                            if isinstance(res, tuple) and len(res) == 3: # Check if we return token info
+                                resStr, input_tokens, output_tokens = res
+                            else:
+                                resStr = str(res)  # Ensure res is a string
+                                # If no token info provided, set to 0
+                                input_tokens = 0
+                                output_tokens = 0
+                            
+                            pred = extractAnswer(resStr)
+                            
+                            # Write debug output to lastOutput.txt
+                            debug_file_path = os.path.join(os.path.dirname(self.resultPath), "lastOutput.txt")
+                            with open(debug_file_path, 'w', encoding='utf-8') as f:
+                                f.write(resStr + "\n\n" + "*"*20 + "\n\nExtracted answer: " + pred)
+                            
+                            time.sleep(timeSleep)
+                        except Exception as e:
+                            print(e)
+                            error = str(e)
+                    else:
+                        # For invalid questions, set empty values but still insert
+                        pred = ""
+                        resStr = ""
+                        error = f"Invalid question: {reason}"
+                    
                     self.resultCur.execute(
                         TaskCore.inserttemplate.format(table_name=dbn),
                         (
@@ -231,6 +295,7 @@ class TaskCore:
                             input_tokens,
                             output_tokens,
                             qtype,
+                            1 if is_valid else 0,  # validQuestion column
                         ),
                     )
                     self.resultConn.commit()

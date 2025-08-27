@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import argparse
 from collections import defaultdict, Counter
 
 from rich.console import Console
@@ -33,16 +34,34 @@ def get_models(conn, tables):
     return sorted(models)
 
 
-def fetch_stats(conn, table, model=None, qtype=None):
+def fetch_stats(conn, table, model=None, qtype=None, allow_invalid=False, scale="8k"):
     cur = conn.cursor()
+    
+    # Check if validQuestion column exists
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = [col[1] for col in cur.fetchall()]
+    has_valid_question = 'validQuestion' in columns
+    
+    # Build query to filter out invalid questions (unless allow_invalid is True)
     query = f"SELECT correct, message FROM [{table}] WHERE 1=1"
     params = []
+    
+    # Only include rows where validQuestion=1 or validQuestion column doesn't exist
+    # (unless allow_invalid flag is set)
+    if has_valid_question and not allow_invalid:
+        query += " AND (validQuestion = 1 OR validQuestion IS NULL)"
+    
+    # Filter by scale
+    query += " AND scale=?"
+    params.append(scale)
+    
     if model:
         query += " AND model=?"
         params.append(model)
     if qtype:
         query += " AND qtype=?"
         params.append(qtype)
+    
     cur.execute(query, params)
     rows = cur.fetchall()
     total = len(rows)
@@ -51,7 +70,9 @@ def fetch_stats(conn, table, model=None, qtype=None):
     errors = sum(1 for c, m in rows if m and 'error' in str(m).lower())
     incorrect = total - correct
     acc = correct / total if total > 0 else 0.0
-    return dict(total=total, correct=correct, incorrect=incorrect, errors=errors, accuracy=acc)
+    # Create scoreList: 1 for correct, 0 for incorrect
+    scoreList = [1 if c == 1 else 0 for c, m in rows]
+    return dict(total=total, correct=correct, incorrect=incorrect, errors=errors, accuracy=acc, scoreList=scoreList)
 
 
 def accuracy_style(acc):
@@ -90,27 +111,68 @@ def make_table(title, rows):
     return table
 
 
-def make_delta_table(label_order, stats1, stats2):
-    table = RichTable(title="Delta", box=box.SQUARE)
+def make_comparison_table(label_order, stats1, stats2):
+    table = RichTable(title="Comparison", box=box.SQUARE)
     table.add_column("Delta", justify="center")
+    table.add_column("[green]A[/green][red]B[/red]", justify="center")
+    table.add_column("[red]A[/red][green]B[/green]", justify="center")
+    table.add_column("[red]A[/red][red]B[/red]", justify="center")
+    table.add_column("[green]A[/green][green]B[/green]", justify="center")
     for label in label_order:
         correct1 = stats1.get(label, dict(correct=0)).get('correct', 0)
         correct2 = stats2.get(label, dict(correct=0)).get('correct', 0)
+        scoreList1 = stats1.get(label, dict(scoreList=[])).get('scoreList', [])
+        scoreList2 = stats2.get(label, dict(scoreList=[])).get('scoreList', [])
+        
         delta = correct2 - correct1
+        
+        # Calculate the 4 comparison categories using actual score lists
+        a_right_b_wrong = 0
+        a_wrong_b_right = 0
+        both_wrong = 0
+        both_right = 0
+        
+        # Compare each question position (assuming same order)
+        min_length = min(len(scoreList1), len(scoreList2))
+        for i in range(min_length):
+            a_score = scoreList1[i]
+            b_score = scoreList2[i]
+            
+            if a_score == 1 and b_score == 0:
+                a_right_b_wrong += 1
+            elif a_score == 0 and b_score == 1:
+                a_wrong_b_right += 1
+            elif a_score == 0 and b_score == 0:
+                both_wrong += 1
+            elif a_score == 1 and b_score == 1:
+                both_right += 1
+        
+        # Calculate improvement percentage
+        total_compared = len(scoreList1) if len(scoreList1) == len(scoreList2) else min(len(scoreList1), len(scoreList2))
+        improvement_pct = abs(delta / total_compared * 100) if total_compared > 0 else 0.0
+        
         if delta > 0:
-            style = "green"
-            delta_str = f"+{delta}"
+            delta_str = f"[green]+{delta} ({improvement_pct:.1f}%)[/green]"
         elif delta < 0:
-            style = "red"
-            delta_str = f"{delta}"
+            delta_str = f"[red]{delta} ({improvement_pct:.1f}%)[/red]"
         else:
-            style = None
-            delta_str = "+0"
-        table.add_row(f"[{style}]{delta_str}[/]" if style else delta_str)
+            delta_str = f"0 ({improvement_pct:.1f}%)"
+        
+        # Color the numbers based on conditions
+        a_right_b_wrong_str = f"[red]{a_right_b_wrong}[/red]" if a_right_b_wrong > 0 else str(a_right_b_wrong)
+        a_wrong_b_right_str = f"[green]{a_wrong_b_right}[/green]" if a_wrong_b_right > 0 else str(a_wrong_b_right)
+        
+        table.add_row(
+            delta_str,
+            a_right_b_wrong_str,
+            a_wrong_b_right_str,
+            str(both_wrong),
+            str(both_right)
+        )
     return table
 
 
-def analyze_sqlite(path):
+def analyze_sqlite(path, allow_invalid=False, scale="8k"):
     conn = sqlite3.connect(path)
     tables = get_tables(conn)
     models = get_models(conn, tables)
@@ -130,17 +192,18 @@ def analyze_sqlite(path):
                 all_qtypes.append(q)
         table_rows = []
         for qtype in table_qtypes:
-            stats = fetch_stats(conn, table, model, qtype)
+            stats = fetch_stats(conn, table, model, qtype, allow_invalid, scale)
             table_rows.append((str(qtype), stats))
             for k in ["total", "correct", "incorrect", "errors"]:
                 global_qtype_stats[qtype][k] += stats[k]
                 global_stats[k] += stats[k]
         # Table summary row
-        summary_stats = fetch_stats(conn, table, model)
+        summary_stats = fetch_stats(conn, table, model, allow_invalid=allow_invalid, scale=scale)
         table_rows.append(("ALL", summary_stats))
         per_table_rows[table] = table_rows
     # Overall per qtype (across all tables) in the same order as first table
     overall_rows = []
+    global_scoreLists = defaultdict(list)
     for qtype in all_qtypes:
         stats = global_qtype_stats[qtype]
         total = stats["total"]
@@ -148,14 +211,30 @@ def analyze_sqlite(path):
         incorrect = stats["incorrect"]
         errors = stats["errors"]
         acc = correct / total if total > 0 else 0.0
-        overall_rows.append((str(qtype), dict(total=total, correct=correct, incorrect=incorrect, errors=errors, accuracy=acc)))
-    # Global summary row
+        
+        # Collect scoreLists for aggregation
+        for table in tables:
+            try:
+                qtype_stats = fetch_stats(conn, table, model, qtype, allow_invalid, scale)
+                if 'scoreList' in qtype_stats:
+                    global_scoreLists[qtype].extend(qtype_stats['scoreList'])
+            except Exception:
+                continue
+        
+        overall_rows.append((str(qtype), dict(total=total, correct=correct, incorrect=incorrect, errors=errors, accuracy=acc, scoreList=global_scoreLists[qtype])))
+    
+    # Global summary row - aggregate all scoreLists
     total = global_stats["total"]
     correct = global_stats["correct"]
     incorrect = global_stats["incorrect"]
     errors = global_stats["errors"]
     acc = correct / total if total > 0 else 0.0
-    overall_rows.append(("ALL", dict(total=total, correct=correct, incorrect=incorrect, errors=errors, accuracy=acc)))
+    
+    all_scoreList = []
+    for qtype in all_qtypes:
+        all_scoreList.extend(global_scoreLists[qtype])
+    
+    overall_rows.append(("ALL", dict(total=total, correct=correct, incorrect=incorrect, errors=errors, accuracy=acc, scoreList=all_scoreList)))
     return {
         "model": model,
         "tables": tables,
@@ -166,14 +245,20 @@ def analyze_sqlite(path):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: uv run analyze_results.py path1 path2")
-        sys.exit(1)
-    path1, path2 = sys.argv[1], sys.argv[2]
+    parser = argparse.ArgumentParser(description="Analyze and compare results from two SQLite files")
+    parser.add_argument("path1", help="Path to first SQLite file")
+    parser.add_argument("path2", help="Path to second SQLite file")
+    parser.add_argument("--allow-invalid", action="store_true", 
+                       help="Include invalid questions in analysis (default: filter out invalid questions)")
+    parser.add_argument("--scale", default="8k", 
+                       help="Scale of data to analyze (default: 8k)")
+    
+    args = parser.parse_args()
+    
     console = Console()
     try:
-        res1 = analyze_sqlite(path1)
-        res2 = analyze_sqlite(path2)
+        res1 = analyze_sqlite(args.path1, allow_invalid=args.allow_invalid, scale=args.scale)
+        res2 = analyze_sqlite(args.path2, allow_invalid=args.allow_invalid, scale=args.scale)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -192,9 +277,9 @@ def main():
         stats2 = {label: stats for label, stats in rows2}
         aligned_rows1 = [(label, stats1.get(label, dict(total=0, correct=0, incorrect=0, errors=0, accuracy=0.0))) for label in label_order]
         aligned_rows2 = [(label, stats2.get(label, dict(total=0, correct=0, incorrect=0, errors=0, accuracy=0.0))) for label in label_order]
-        delta_table = make_delta_table(label_order, stats1, stats2)
         table1 = make_table(left_title, aligned_rows1)
         table2 = make_table(right_title, aligned_rows2)
+        delta_table = make_comparison_table(label_order, stats1, stats2)
         panel = Panel.fit(
             Columns([table1, table2, delta_table], padding=(1, 4)),
             title=f"Table: {table}",
@@ -209,7 +294,7 @@ def main():
     stats2 = {label: stats for label, stats in res2["overall_rows"]}
     aligned_rows1 = [(label, stats1.get(label, dict(total=0, correct=0, incorrect=0, errors=0, accuracy=0.0))) for label in label_order]
     aligned_rows2 = [(label, stats2.get(label, dict(total=0, correct=0, incorrect=0, errors=0, accuracy=0.0))) for label in label_order]
-    delta_table = make_delta_table(label_order, stats1, stats2)
+    delta_table = make_comparison_table(label_order, stats1, stats2)
     table1 = make_table(left_title, aligned_rows1)
     table2 = make_table(right_title, aligned_rows2)
     panel = Panel.fit(
