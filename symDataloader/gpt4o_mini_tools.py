@@ -20,6 +20,7 @@ from tqdm import tqdm
 sys.path.append('.')
 from symbolic import dataDict
 from symDataloader.utils import TaskCore
+import symDataloader.testConfig as testConfig
 from benchmarkLoader import singleChoiceToolsPrompt
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,7 @@ def executePython(code: str):
             last_line = code_lines[-1].strip()
             if last_line and not last_line.startswith('print('):
                 # Inject a notice print before the injected print
-                code_lines[-1:]= [
+                code_lines[-1:] = [
                     f'_internal_executor_last_line = {last_line}',
                     'print("Printing evaluation of last line: " + str(_internal_executor_last_line))'
                 ]
@@ -263,14 +264,21 @@ def executePython(code: str):
         stdout_output = stdout_capture.getvalue()
         stderr_output = stderr_capture.getvalue()
 
-        # Prepare the result
+        # Truncate each result part to a reasonable length (e.g., 1000 chars)
+        def truncate(text, maxlen=1000):
+            if not testConfig.limitContextGrowth:
+                return text
+            if text and len(text) > maxlen:
+                return text[:maxlen] + f"\n... (truncated, {len(text)-maxlen} more chars. Output is truncated automatically at {maxlen} chars, either do more filtering, or if the result looks right, proceed.)"
+            return text
+
         result_parts = []
         if stdout_output:
-            result_parts.append(f"STDOUT:\n{stdout_output}")
+            result_parts.append(f"STDOUT:\n{truncate(stdout_output)}")
         if stderr_output:
-            result_parts.append(f"STDERR:\n{stderr_output}")
+            result_parts.append(f"STDERR:\n{truncate(stderr_output)}")
         if error_occurred:
-            result_parts.append(f"ERROR:\n{error_message}")
+            result_parts.append(f"ERROR:\n{truncate(error_message)}")
         if not result_parts:
             result_parts.append("Code executed successfully with no output.")
 
@@ -282,7 +290,10 @@ def executePython(code: str):
 
 
 # Tool registry - array of functions
-TOOLS = [getTableNames, peekTables, readTables, executePython]
+if testConfig.limitContextGrowth:
+    TOOLS = [getTableNames, peekTables, executePython]
+else:
+    TOOLS = [getTableNames, peekTables, readTables, executePython]
 
 
 def _convert_type_to_json_schema(param_type: Any) -> dict:
@@ -598,10 +609,14 @@ def gpt4oToolsCall(dbStr, question, choices):
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB'  # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite'  # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/4o_mini_tools.sqlite'  # result sqlite
+    resultPath = f'symDataset/results/TableQA/4o_mini_tools{testConfig.saveFileSuffix}.sqlite'  # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
-        for scale in ['8k']:
+        # Apply table filter if specified
+        if testConfig.tableFilter and k not in testConfig.tableFilter:
+            continue
+        
+        for scale in testConfig.dbScales:
             timeSleep = 0
             tc.testAll('gpt-4o-mini-tools',  # The model name saved in taskPath
                        k,  # dataset
@@ -612,7 +627,8 @@ if __name__ == '__main__':
                        14,  # questionLimit, 14 is ok
                        gpt4oToolsCall,
                        timeSleep,
-                       genDataFrames=True)
+                       genDataFrames=True,
+                       injectContextJunk=testConfig.injectContextJunk)
             
             # Clear console after each testAll call to reduce memory usage
             try:

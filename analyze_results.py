@@ -250,23 +250,25 @@ def main():
     parser.add_argument("path2", help="Path to second SQLite file")
     parser.add_argument("--allow-invalid", action="store_true", 
                        help="Include invalid questions in analysis (default: filter out invalid questions)")
-    parser.add_argument("--scale", default="8k", 
-                       help="Scale of data to analyze (default: 8k)")
+    parser.add_argument("--scalea", default="8k", 
+                       help="Scale of data to analyze for first file (default: 8k)")
+    parser.add_argument("--scaleb", default="8k", 
+                       help="Scale of data to analyze for second file (default: 8k)")
     
     args = parser.parse_args()
     
     console = Console()
     try:
-        res1 = analyze_sqlite(args.path1, allow_invalid=args.allow_invalid, scale=args.scale)
-        res2 = analyze_sqlite(args.path2, allow_invalid=args.allow_invalid, scale=args.scale)
+        res1 = analyze_sqlite(args.path1, allow_invalid=args.allow_invalid, scale=args.scalea)
+        res2 = analyze_sqlite(args.path2, allow_invalid=args.allow_invalid, scale=args.scaleb)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
     # Use the union of all tables, but keep order from first
     all_tables = res1["tables"]
     # Panel titles
-    left_title = f"{res1['model']}"
-    right_title = f"{res2['model']}"
+    left_title = f"{res1['model']} (scale: {args.scalea})"
+    right_title = f"{res2['model']} (scale: {args.scaleb})"
     # For each table
     for table in all_tables:
         rows1 = res1["per_table_rows"].get(table, [])

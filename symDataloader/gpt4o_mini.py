@@ -5,6 +5,7 @@ import sys
 sys.path.append('.')
 from symbolic import dataDict
 from symDataloader.utils import TaskCore
+import symDataloader.testConfig as testConfig
 from benchmarkUtils.LLM import gptCall
 from benchmarkLoader import singlePrompt
 
@@ -28,11 +29,14 @@ def gpt4oCall(dbStr, question, choices):
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB' # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite' # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/4o_mini.sqlite' # result sqlite
+    resultPath = f'symDataset/results/TableQA/4o_mini{testConfig.saveFileSuffix}.sqlite' # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
-        # for scale in ['8k', '16k', '32k', '64k']:
-        for scale in ['8k']:
+        # Apply table filter if specified
+        if testConfig.tableFilter and k not in testConfig.tableFilter:
+            continue
+        
+        for scale in testConfig.dbScales:
             timeSleep = 0
             if scale == '16k':
                 # timeSleep = 30
@@ -48,7 +52,8 @@ if __name__ == '__main__':
                     1, # sampleLimit, 1 is ok
                     14, # questionLimit, 14 is ok
                     gpt4oCall,
-                    timeSleep)
+                    timeSleep,
+                    injectContextJunk=testConfig.injectContextJunk)
             # tc.testAll('gpt-4o-mini', # The model name saved in taskPath
             #         k, # dataset
             #         scale, # 8k, 16k, 32k, 64k, 128k

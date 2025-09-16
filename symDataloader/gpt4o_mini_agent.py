@@ -20,6 +20,7 @@ from tqdm import tqdm
 sys.path.append('.')
 from symbolic import dataDict
 from symDataloader.utils import TaskCore
+import symDataloader.testConfig as testConfig
 from benchmarkLoader import build_stage1_prompt, build_stage2_prompt, build_stage3_prompt
 
 # ---------------------------------------------------------------------------
@@ -316,14 +317,22 @@ def executePython(code: str):
         stdout_output = stdout_capture.getvalue()
         stderr_output = stderr_capture.getvalue()
 
+        # Truncate each result part to a reasonable length (e.g., 1000 chars)
+        def truncate(text, maxlen=1000):
+            if not testConfig.limitContextGrowth:
+                return text
+            if text and len(text) > maxlen:
+                return text[:maxlen] + f"\n... (truncated, {len(text)-maxlen} more chars. Output is truncated automatically at {maxlen} chars, either do more filtering, or if the result looks right, proceed.)"
+            return text
+
         # Prepare the result
         result_parts = []
         if stdout_output:
-            result_parts.append(f"STDOUT:\n{stdout_output}")
+            result_parts.append(f"STDOUT:\n{truncate(stdout_output)}")
         if stderr_output:
-            result_parts.append(f"STDERR:\n{stderr_output}")
+            result_parts.append(f"STDERR:\n{truncate(stderr_output)}")
         if error_occurred:
-            error_note = f"ERROR:\n{error_message}"
+            error_note = f"ERROR:\n{truncate(error_message)}"
             
             # Add helpful note about string escaping and variable usage
             if "string" in error_message.lower() or "escape" in error_message.lower() or "quote" in error_message.lower():
@@ -436,7 +445,10 @@ def generateTable(newTableKey: str, code: str):
 
 
 # Tool registry - array of functions
-TOOLS = [getTableNames, peekTables, readTables, executePython]
+if testConfig.limitContextGrowth:
+    TOOLS = [getTableNames, peekTables, executePython]
+else:
+    TOOLS = [getTableNames, peekTables, readTables, executePython]
 
 
 def _convert_type_to_json_schema(param_type: Any) -> dict:
@@ -511,20 +523,36 @@ def format_tool_result(tool_name: str, result: str) -> str:
 # 3. Stage Configuration
 # ---------------------------------------------------------------------------
 
-STAGES = {
-    "exploration": {
-        "tools": ["peekTables", "readTables", "executePython"],
-        "completion_marker": "TABLES RELEVANT:"
-    },
-    "data_prep": {
-        "tools": ["peekTables", "readTables", "executePython"],
-        "completion_marker": "PREPARED TABLE NAME:"
-    },
-    "analysis": {
-        "tools": ["peekTables", "readTables", "executePython"],
-        "completion_marker": "Answer:"
+if testConfig.limitContextGrowth:
+    STAGES = {
+        "exploration": {
+            "tools": ["peekTables", "executePython"],
+            "completion_marker": "TABLES RELEVANT:"
+        },
+        "data_prep": {
+            "tools": ["peekTables", "executePython"],
+            "completion_marker": "PREPARED TABLE NAME:"
+        },
+        "analysis": {
+            "tools": ["peekTables", "executePython"],
+            "completion_marker": "Answer:"
+        }
     }
-}
+else:
+    STAGES = {
+        "exploration": {
+            "tools": ["peekTables", "readTables", "executePython"],
+            "completion_marker": "TABLES RELEVANT:"
+        },
+        "data_prep": {
+            "tools": ["peekTables", "readTables", "executePython"],
+            "completion_marker": "PREPARED TABLE NAME:"
+        },
+        "analysis": {
+            "tools": ["peekTables", "readTables", "executePython"],
+            "completion_marker": "Answer:"
+        }
+    }
 
 
 def parse_stage_completion(content: str, stage: str) -> Dict[str, Any]:
@@ -998,10 +1026,14 @@ def gpt4ominiAgentCall(dbStr, question, choices):
 if __name__ == '__main__':
     dbRoot = 'symDataset/scaledDB'  # path to extract symDataset.zip
     taskPath = 'symDataset/tasks/TableQA/dataset.sqlite'  # TableQA's dataset.sqlite
-    resultPath = 'symDataset/results/TableQA/4o_mini_agent.sqlite'  # result sqlite
+    resultPath = f'symDataset/results/TableQA/4o_mini_agent{testConfig.saveFileSuffix}.sqlite'  # result sqlite
     tc = TaskCore(dbRoot, taskPath, resultPath)
     for k in dataDict.keys():
-        for scale in ['8k']:
+        # Apply table filter if specified
+        if testConfig.tableFilter and k not in testConfig.tableFilter:
+            continue
+        
+        for scale in testConfig.dbScales:
             timeSleep = 0
             tc.testAll('gpt-4o-mini-agent',  # The model name saved in taskPath
                        k,  # dataset
@@ -1012,7 +1044,8 @@ if __name__ == '__main__':
                        14,  # questionLimit, 14 is ok
                        gpt4ominiAgentCall,
                        timeSleep,
-                       genDataFrames=True)
+                       genDataFrames=True,
+                       injectContextJunk=testConfig.injectContextJunk)
             
             # Clear console after each testAll call to reduce memory usage
             try:

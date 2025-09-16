@@ -1,4 +1,6 @@
 import os
+import random
+import string
 import pandas as pd
 import sqlite3
 from tqdm import tqdm
@@ -15,7 +17,7 @@ class DatabaseObject:
         self.data = tables_dict
 
 class DB:
-    def __init__(self, dbp, initTables=True):
+    def __init__(self, dbp, initTables=True, injectContextJunk=False):
         """
         This remains compatible with older code, so `initTables` is added to initialize tables.
         If you are only performing sampling, set this to `False` to speed things up.
@@ -35,6 +37,8 @@ class DB:
         self.curs = self.conn.cursor()
         self.tableNames = []
         self.tableNames = self.getAllTableNames()
+
+        self.injectContextJunk = injectContextJunk
 
         self.tables = {}
         if initTables:
@@ -96,6 +100,36 @@ class DB:
         for tn in tablesName['name']:
             newTN = tn.strip().replace(' ', '_').replace('-', '_').replace('\t', '_') # Make sure to replace spaces, tabs, etc. in the DataFrame name; otherwise the code won’t run
             dataframes[newTN] = pd.read_sql(f"SELECT * FROM [{tn}]", self.conn)
+        
+        # Inject context junk: new column "is_garbage_data" and "other_data"
+        # Update old values to have is_garbage_data = False and other_data as empty string
+        if self.injectContextJunk:
+            for tn in dataframes.keys():
+                # Add new columns to existing data
+                dataframes[tn]['is_garbage_data'] = False
+                dataframes[tn]['other_data'] = ''
+                
+                # Create garbage row with proper values for all columns
+                garbage_row = {}
+                for col in dataframes[tn].columns:
+                    if col == 'is_garbage_data':
+                        garbage_row[col] = True
+                    elif col == 'other_data':
+                        garbage_row[col] = ''.join(random.choices(string.ascii_letters + string.digits, k=1_000_000))
+                    else:
+                        # Set appropriate default values for other columns based on data type
+                        if dataframes[tn][col].dtype == 'object':  # String/text columns
+                            garbage_row[col] = 'GARBAGE_DATA'
+                        elif dataframes[tn][col].dtype in ['int64', 'int32']:  # Integer columns
+                            garbage_row[col] = -999
+                        elif dataframes[tn][col].dtype in ['float64', 'float32']:  # Float columns
+                            garbage_row[col] = -999.0
+                        else:  # Other types
+                            garbage_row[col] = 'GARBAGE_DATA'
+                
+                # Add the garbage row
+                dataframes[tn] = pd.concat([dataframes[tn], pd.DataFrame([garbage_row])], ignore_index=True)
+
         self.tables = dataframes
         return dataframes
     

@@ -92,6 +92,12 @@ class TaskCore:
     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     """
 
+    insertreplacetemplate = """
+    insert or replace into {table_name}
+    (model, scale, markdown, dbidx, sampleidx, questionidx, gt, pred, correct, error, message, input_tokens, output_tokens, qtype, validQuestion)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """
+
     def __init__(self, dbRoot, taskPath, resultPath) -> None:
         self.dbRoot = dbRoot
         self.taskPath = taskPath
@@ -175,9 +181,43 @@ class TaskCore:
             TaskCore.primarykeycheck.format(table_name=dbn),
             (model, scale, markdown, dbIdx, sampleIdx, questionIdx),
         )
-        if self.resultCur.fetchone():
+        result = self.resultCur.fetchone()
+        if result:
             return True
         return False
+
+    def shouldRerun(self, dbn, model, scale, markdown, dbIdx, sampleIdx, questionIdx):
+        """
+        Check if a question should be rerun based on error conditions.
+        Returns True if the question should be rerun (i.e., skip=False).
+        """
+        # First check if record exists
+        self.resultCur.execute(
+            TaskCore.primarykeycheck.format(table_name=dbn),
+            (model, scale, markdown, dbIdx, sampleIdx, questionIdx),
+        )
+        result = self.resultCur.fetchone()
+        if not result:
+            return True  # No record exists, should run
+        
+        # Get the full record to check error and message columns
+        self.resultCur.execute(
+            f"SELECT error, message FROM {dbn} WHERE model = ? AND scale = ? AND markdown = ? AND dbidx = ? AND sampleidx = ? AND questionidx = ?",
+            (model, scale, markdown, dbIdx, sampleIdx, questionIdx)
+        )
+        record = self.resultCur.fetchone()
+        if not record:
+            return True  # No record found, should run
+        
+        error, message = record
+        
+        # Check if we should rerun: error != "" and message == "" and error contains "Failed to call OpenAI API"
+        if (error and error.strip() != "" and 
+            (message is None or message.strip() == "") and 
+            "Failed to call OpenAI API" in error):
+            return True  # Should rerun
+        
+        return False  # Should skip
 
     @staticmethod
     def tableLlamaSerialize(tbn: str, df: pd.DataFrame):
@@ -205,6 +245,7 @@ class TaskCore:
         func,
         timeSleep=0,
         genDataFrames=False,
+        injectContextJunk=False,
     ):
         """
         func need to be a call function have 3 arguments -- dbStr, question, choicesStr
@@ -212,15 +253,15 @@ class TaskCore:
         for dbIdx in tqdm(range(dbLimit), desc=f"DBs ({dbn})", position=0, leave=True):
             for sampleIdx in tqdm(range(sampleLimit), desc=f"  Sample", position=1, leave=False):
                 for questionIdx in tqdm(range(questionLimit), desc=f"    Questions", position=2, leave=False):
-                    # if self.resultCheck(
-                    #     dbn, model, scale, markdown, dbIdx, sampleIdx, questionIdx
-                    # ):
-                    #     continue
+                    if not self.shouldRerun(
+                        dbn, model, scale, markdown, dbIdx, sampleIdx, questionIdx
+                    ):
+                        continue
                     item = self.loadTaskItem(dbn, scale, dbIdx, sampleIdx, questionIdx)
                     if item is None:
                         continue
                     dbp = os.path.join(self.dbRoot, scale, dbn, f"{dbIdx}.sqlite")
-                    db = DB(dbp)
+                    db = DB(dbp, injectContextJunk=injectContextJunk)
                     dbStr = ""
                     if genDataFrames:
                         # Create pandas DataFrames from the database tables
@@ -279,7 +320,7 @@ class TaskCore:
                         error = f"Invalid question: {reason}"
                     
                     self.resultCur.execute(
-                        TaskCore.inserttemplate.format(table_name=dbn),
+                        TaskCore.insertreplacetemplate.format(table_name=dbn),
                         (
                             model,
                             scale,
