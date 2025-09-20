@@ -3,13 +3,14 @@ Test configuration for TQA-Bench experiments.
 """
 
 # Database scales to test
-dbScales = ['128k']
-# dbScales = ['8k']
+# dbScales = ['128k']
+dbScales = ['8k']
 
 # Table filter - only test these tables if array is not empty
 # If empty, test all tables
 tableFilter = []
 # tableFilter = ['water_quality']
+tableFilter = ['restaurant']
 
 # Context truncate length
 # If True, disables readTables tool, and truncates executePython output
@@ -25,3 +26,4 @@ injectContextJunk = False
 saveFileSuffix = ''
 # saveFileSuffix = '_limited' # Use if limitContextGrowth is True
 # saveFileSuffix = '_limitedWithJunk' # Use if limitContextGrowth && injectContextJunk is True
+saveFileSuffix = 'test'

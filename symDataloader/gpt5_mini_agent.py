@@ -128,7 +128,9 @@ def peekTables(tableNames: list[str]):
 def readTables(tableNames: list[str]):
     """
     Read the given table names and return the entire data as a string.
-    If none provided or non-existent table provided, warn in return result.
+    
+    Args:
+        tableNames (list[str]): A list of table names to read.
     """
     try:
         if not tableNames:
@@ -667,11 +669,43 @@ def _openai_chat(body: Dict[str, Any], proxies: Dict[str, str]) -> Dict[str, Any
             os.system('cls' if os.name == 'nt' else 'clear')
         except Exception:
             pass
-        print("[user-emulate] ChatCompletions request body:")
-        try:
-            print(json.dumps(body, indent=2, ensure_ascii=False))
-        except Exception:
-            print(str(body))
+        
+        print("[user-emulate] GPT-5-mini ChatCompletions request:")
+        print(f"Model: {body.get('model', 'unknown')}")
+        print(f"Temperature: {body.get('temperature', 'default')}")
+        print(f"Top-p: {body.get('top_p', 'default')}")
+        print(f"Tool choice: {body.get('tool_choice', 'none')}")
+        
+        # Display messages
+        messages = body.get('messages', [])
+        print(f"\nMessages ({len(messages)}):")
+        for i, msg in enumerate(messages, 1):
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            print(f"--- message {i}: {role} ---")
+            print(content)
+            
+            # Show tool calls if present
+            tool_calls = msg.get('tool_calls')
+            if tool_calls:
+                for j, tc in enumerate(tool_calls, 1):
+                    func = tc.get('function', {})
+                    name = func.get('name', 'unknown')
+                    args = func.get('arguments', '{}')
+                    print(f"--- tool call {j}: {name} ---")
+                    print(f"Arguments: {args}")
+        
+        # Display available tools
+        tools = body.get('tools', [])
+        if tools:
+            print(f"\nAvailable tools ({len(tools)}):")
+            for i, tool in enumerate(tools, 1):
+                func = tool.get('function', {})
+                name = func.get('name', 'unknown')
+                description = func.get('description', 'No description')
+                print(f"--- tool {i}: {name} (function) ---")
+                print(description)
+        
         print("\nEnter assistant response (single line). Options:")
         print("  - Plain text to return as assistant content")
         print("  - !call <toolName> <argsJson> to request a tool call (e.g., !call getTableNames {})")

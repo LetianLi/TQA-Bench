@@ -1,4 +1,6 @@
 import random
+import os
+import json
 
 import sys
 
@@ -9,6 +11,28 @@ import symDataloader.testConfig as testConfig
 from benchmarkUtils.LLM import gptCall
 from benchmarkLoader import singlePrompt
 
+# ---------------------------------------------------------------------------
+# Emulation flag and helpers
+# ---------------------------------------------------------------------------
+USER_EMULATE: bool = False
+
+
+def _consume_user_emulate_flag() -> None:
+    global USER_EMULATE
+    # Support a simple CLI flag without restructuring existing __main__ blocks
+    for arg in list(sys.argv[1:]):
+        if arg == "--user-emulate":
+            USER_EMULATE = True
+            try:
+                sys.argv.remove(arg)
+            except ValueError:
+                pass
+        else:
+            raise Exception(f"Unknown argument: {arg}")
+
+
+_consume_user_emulate_flag()
+
 def qaPrompt(dbStr, question, choices):
     totalQuestion = f'{dbStr}\n\n{question}\n\n{choices}'
     prompt = singlePrompt.format(question=totalQuestion)
@@ -16,6 +40,22 @@ def qaPrompt(dbStr, question, choices):
 
 def gpt5miniCall(dbStr, question, choices):
     prompt = qaPrompt(dbStr, question, choices)
+    
+    # Emulation mode: do not call API. Clear console, print request, and capture input as assistant response
+    if USER_EMULATE:
+        try:
+            os.system('cls' if os.name == 'nt' else 'clear')
+        except Exception:
+            pass
+        print("[user-emulate] GPT-5-mini request:")
+        print(f"Model: gpt-5-mini")
+        print(f"Prompt: {prompt}")
+        print("\nEnter assistant response:")
+        user_resp = input("> ")
+        
+        # Return the user response with dummy token counts
+        return user_resp, 0, 0
+    
     message, input_tokens, output_tokens = gptCall(
         'gpt-5-mini',
         prompt,
